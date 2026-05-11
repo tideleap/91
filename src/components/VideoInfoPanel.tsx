@@ -45,6 +45,13 @@ export function VideoInfoPanel({
           <span className="info-row__value">{video.publishedAt}</span>
         </div>
 
+        {video.sourceLabel && (
+          <div className="info-row">
+            <span className="info-row__label">来源网盘</span>
+            <span className="info-row__value">{video.sourceLabel}</span>
+          </div>
+        )}
+
         <div className="info-row">
           <span className="info-row__label">来源/合集</span>
           <div className="info-row__value">

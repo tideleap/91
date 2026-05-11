@@ -44,6 +44,7 @@ type VideoDTO struct {
 	Duration        string   `json:"duration"`
 	Badges          []string `json:"badges"`
 	Quality         string   `json:"quality,omitempty"`
+	SourceLabel     string   `json:"sourceLabel,omitempty"`
 	Author          string   `json:"author"`
 	Views           int      `json:"views"`
 	Favorites       int      `json:"favorites"`
@@ -157,9 +158,13 @@ func (s *Server) handleVideoDetail(w http.ResponseWriter, r *http.Request) {
 	related, _, _ := s.Catalog.ListVideos(r.Context(), catalog.ListParams{
 		Sort: "hot", Page: 1, PageSize: 8,
 	})
+	dto := mapVideo(v)
+	if d, err := s.Catalog.GetDrive(r.Context(), v.DriveID); err == nil {
+		dto.SourceLabel = driveKindLabel(d.Kind)
+	}
 
 	detail := VideoDetailDTO{
-		VideoDTO:    mapVideo(v),
+		VideoDTO:    dto,
 		VideoSrc:    videoSource(v),
 		Poster:      thumbnailURL(v),
 		Description: v.Description,
@@ -472,6 +477,23 @@ func needsBrowserTranscode(ext string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func driveKindLabel(kind string) string {
+	switch kind {
+	case "quark":
+		return "夸克网盘"
+	case "p115":
+		return "115 网盘"
+	case "pikpak":
+		return "PikPak"
+	case "wopan":
+		return "联通沃盘"
+	case "onedrive":
+		return "OneDrive"
+	default:
+		return kind
 	}
 }
 

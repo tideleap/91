@@ -221,6 +221,57 @@ func TestHandleUpdateVideoTagsSavesExistingTags(t *testing.T) {
 	}
 }
 
+func TestHandleVideoDetailIncludesDriveKindLabel(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+	now := time.Now()
+	if err := cat.UpsertDrive(ctx, &catalog.Drive{
+		ID:        "drive-onedrive",
+		Kind:      "onedrive",
+		Name:      "Personal Drive",
+		RootID:    "root",
+		Status:    "ok",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed drive: %v", err)
+	}
+	if err := cat.UpsertVideo(ctx, &catalog.Video{
+		ID:          "video-1",
+		DriveID:     "drive-onedrive",
+		FileID:      "file-1",
+		Title:       "Video",
+		PublishedAt: now,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("seed video: %v", err)
+	}
+
+	req := requestWithVideoID(http.MethodGet, "/api/video/video-1", "video-1", strings.NewReader(``))
+	rr := httptest.NewRecorder()
+	(&Server{Catalog: cat}).handleVideoDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got VideoDetailDTO
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.SourceLabel != "OneDrive" {
+		t.Fatalf("sourceLabel = %q, want OneDrive", got.SourceLabel)
+	}
+}
+
 func TestHandleHideVideoRemovesVideoFromPublicListAndDetail(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
