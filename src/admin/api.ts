@@ -99,6 +99,7 @@ export type AdminDrive = {
   thumbnailReadyCount: number;
   thumbnailPendingCount: number;
   thumbnailFailedCount: number;
+  thumbnailDurationPendingCount: number;
   teaserReadyCount: number;
   teaserPendingCount: number;
   teaserFailedCount: number;

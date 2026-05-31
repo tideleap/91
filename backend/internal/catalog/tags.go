@@ -209,8 +209,9 @@ func (c *Catalog) resetDriveTeaserEnabledToDefaultOnce(ctx context.Context) erro
 //   - 管理员凭直觉认知字段名时会被误导
 //
 // 修正策略：
-//   - thumbnail_url 非空 + status 非 'ready' + status 非 'failed' → 改成 'ready'
+//   - thumbnail_url 非空 + status 非 'ready' + status 非 'failed' + status 非 'skipped' → 改成 'ready'
 //   - status='failed' 不动（这是 worker 显式标的失败，要保留以便管理员手动重生）
+//   - status='skipped' 不动（已有封面但时长探测不可用，避免重启后重复排队）
 //
 // 幂等保证：marker setting 写过就不再跑，避免每次重启都 update 一遍。
 func (c *Catalog) reconcileThumbnailStatusOnce(ctx context.Context) error {
@@ -227,7 +228,7 @@ UPDATE videos
    SET thumbnail_status = 'ready',
        updated_at = ?
  WHERE COALESCE(thumbnail_url, '') != ''
-   AND COALESCE(thumbnail_status, 'pending') NOT IN ('ready', 'failed')
+   AND COALESCE(thumbnail_status, 'pending') NOT IN ('ready', 'failed', 'skipped')
 `, time.Now().UnixMilli())
 	if err != nil {
 		return fmt.Errorf("reconcile thumbnail_status: %w", err)

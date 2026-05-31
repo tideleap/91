@@ -89,6 +89,46 @@ func TestThumbWorkerBackfillsDurationWhenThumbnailAlreadyExists(t *testing.T) {
 	}
 }
 
+func TestThumbWorkerSkipsDurationBackfillWhenExistingThumbnailCannotBeProbed(t *testing.T) {
+	ctx := context.Background()
+	cat, video := seedPreviewTestVideo(t, "thumb-worker-existing-thumbnail-probe-fails")
+	video.ThumbnailURL = "/p/thumb/" + video.ID
+	if err := cat.UpsertVideo(ctx, video); err != nil {
+		t.Fatalf("update video: %v", err)
+	}
+
+	gen := &fakeThumbGenerator{probeErr: errors.New("invalid media")}
+	drv := &previewFakeDrive{}
+	worker := NewThumbWorker(gen, cat, drv)
+
+	worker.process(ctx, video)
+
+	got, err := cat.GetVideo(ctx, video.ID)
+	if err != nil {
+		t.Fatalf("get video: %v", err)
+	}
+	if got.ThumbnailURL != "/p/thumb/"+video.ID {
+		t.Fatalf("thumbnail = %q, want unchanged existing thumbnail", got.ThumbnailURL)
+	}
+	if got.DurationSeconds != 0 {
+		t.Fatalf("duration = %d, want still unknown", got.DurationSeconds)
+	}
+	skipped, err := cat.ListVideosByThumbnailStatus(ctx, video.DriveID, "skipped", 0)
+	if err != nil {
+		t.Fatalf("list skipped thumbnails: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0].ID != video.ID {
+		t.Fatalf("skipped thumbnails = %#v, want only %s", skipped, video.ID)
+	}
+	missing, err := cat.CountVideosNeedingThumbnail(ctx, video.DriveID)
+	if err != nil {
+		t.Fatalf("count videos needing thumbnail: %v", err)
+	}
+	if missing != 0 {
+		t.Fatalf("missing thumbnails = %d, want 0 after duration backfill is skipped", missing)
+	}
+}
+
 func TestThumbWorkerFallsBackToLocalPreviewWhenDriveStreamFails(t *testing.T) {
 	ctx := context.Background()
 	cat, video := seedPreviewTestVideo(t, "thumb-worker-local-preview")

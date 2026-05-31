@@ -502,64 +502,68 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var got []struct {
-		ID                          string           `json:"id"`
-		ThumbnailGenerationStatus   GenerationStatus `json:"thumbnailGenerationStatus"`
-		PreviewGenerationStatus     GenerationStatus `json:"previewGenerationStatus"`
-		FingerprintGenerationStatus GenerationStatus `json:"fingerprintGenerationStatus"`
-		ThumbnailReadyCount         int              `json:"thumbnailReadyCount"`
-		ThumbnailPendingCount       int              `json:"thumbnailPendingCount"`
-		ThumbnailFailedCount        int              `json:"thumbnailFailedCount"`
-		TeaserReadyCount            int              `json:"teaserReadyCount"`
-		TeaserPendingCount          int              `json:"teaserPendingCount"`
-		TeaserFailedCount           int              `json:"teaserFailedCount"`
-		FingerprintReadyCount       int              `json:"fingerprintReadyCount"`
-		FingerprintPendingCount     int              `json:"fingerprintPendingCount"`
-		FingerprintFailedCount      int              `json:"fingerprintFailedCount"`
+		ID                            string           `json:"id"`
+		ThumbnailGenerationStatus     GenerationStatus `json:"thumbnailGenerationStatus"`
+		PreviewGenerationStatus       GenerationStatus `json:"previewGenerationStatus"`
+		FingerprintGenerationStatus   GenerationStatus `json:"fingerprintGenerationStatus"`
+		ThumbnailReadyCount           int              `json:"thumbnailReadyCount"`
+		ThumbnailPendingCount         int              `json:"thumbnailPendingCount"`
+		ThumbnailFailedCount          int              `json:"thumbnailFailedCount"`
+		ThumbnailDurationPendingCount int              `json:"thumbnailDurationPendingCount"`
+		TeaserReadyCount              int              `json:"teaserReadyCount"`
+		TeaserPendingCount            int              `json:"teaserPendingCount"`
+		TeaserFailedCount             int              `json:"teaserFailedCount"`
+		FingerprintReadyCount         int              `json:"fingerprintReadyCount"`
+		FingerprintPendingCount       int              `json:"fingerprintPendingCount"`
+		FingerprintFailedCount        int              `json:"fingerprintFailedCount"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	byID := map[string]struct {
-		TeaserReady        int
-		TeaserPending      int
-		TeaserFailed       int
-		ThumbnailReady     int
-		ThumbnailPending   int
-		ThumbnailFailed    int
-		FingerprintReady   int
-		FingerprintPending int
-		FingerprintFailed  int
-		Thumbnail          GenerationStatus
-		Preview            GenerationStatus
-		Fingerprint        GenerationStatus
+		TeaserReady              int
+		TeaserPending            int
+		TeaserFailed             int
+		ThumbnailReady           int
+		ThumbnailPending         int
+		ThumbnailFailed          int
+		ThumbnailDurationPending int
+		FingerprintReady         int
+		FingerprintPending       int
+		FingerprintFailed        int
+		Thumbnail                GenerationStatus
+		Preview                  GenerationStatus
+		Fingerprint              GenerationStatus
 	}{}
 	for _, d := range got {
 		byID[d.ID] = struct {
-			TeaserReady        int
-			TeaserPending      int
-			TeaserFailed       int
-			ThumbnailReady     int
-			ThumbnailPending   int
-			ThumbnailFailed    int
-			FingerprintReady   int
-			FingerprintPending int
-			FingerprintFailed  int
-			Thumbnail          GenerationStatus
-			Preview            GenerationStatus
-			Fingerprint        GenerationStatus
+			TeaserReady              int
+			TeaserPending            int
+			TeaserFailed             int
+			ThumbnailReady           int
+			ThumbnailPending         int
+			ThumbnailFailed          int
+			ThumbnailDurationPending int
+			FingerprintReady         int
+			FingerprintPending       int
+			FingerprintFailed        int
+			Thumbnail                GenerationStatus
+			Preview                  GenerationStatus
+			Fingerprint              GenerationStatus
 		}{
-			TeaserReady:        d.TeaserReadyCount,
-			TeaserPending:      d.TeaserPendingCount,
-			TeaserFailed:       d.TeaserFailedCount,
-			ThumbnailReady:     d.ThumbnailReadyCount,
-			ThumbnailPending:   d.ThumbnailPendingCount,
-			ThumbnailFailed:    d.ThumbnailFailedCount,
-			FingerprintReady:   d.FingerprintReadyCount,
-			FingerprintPending: d.FingerprintPendingCount,
-			FingerprintFailed:  d.FingerprintFailedCount,
-			Thumbnail:          d.ThumbnailGenerationStatus,
-			Preview:            d.PreviewGenerationStatus,
-			Fingerprint:        d.FingerprintGenerationStatus,
+			TeaserReady:              d.TeaserReadyCount,
+			TeaserPending:            d.TeaserPendingCount,
+			TeaserFailed:             d.TeaserFailedCount,
+			ThumbnailReady:           d.ThumbnailReadyCount,
+			ThumbnailPending:         d.ThumbnailPendingCount,
+			ThumbnailFailed:          d.ThumbnailFailedCount,
+			ThumbnailDurationPending: d.ThumbnailDurationPendingCount,
+			FingerprintReady:         d.FingerprintReadyCount,
+			FingerprintPending:       d.FingerprintPendingCount,
+			FingerprintFailed:        d.FingerprintFailedCount,
+			Thumbnail:                d.ThumbnailGenerationStatus,
+			Preview:                  d.PreviewGenerationStatus,
+			Fingerprint:              d.FingerprintGenerationStatus,
 		}
 	}
 	if byID["OneDrive"].TeaserReady != 2 || byID["OneDrive"].TeaserPending != 1 || byID["OneDrive"].TeaserFailed != 0 {
@@ -567,6 +571,9 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 	}
 	if byID["OneDrive"].ThumbnailReady != 1 || byID["OneDrive"].ThumbnailPending != 1 || byID["OneDrive"].ThumbnailFailed != 1 {
 		t.Fatalf("OneDrive thumbnail counts = %#v, want ready=1 pending=1 failed=1", byID["OneDrive"])
+	}
+	if byID["OneDrive"].ThumbnailDurationPending != 1 {
+		t.Fatalf("OneDrive thumbnail duration pending = %#v, want 1", byID["OneDrive"])
 	}
 	if byID["OneDrive"].Thumbnail.State != "cooling" || byID["OneDrive"].Preview.State != "generating" {
 		t.Fatalf("OneDrive generation statuses = %#v, want thumbnail cooling and preview generating", byID["OneDrive"])

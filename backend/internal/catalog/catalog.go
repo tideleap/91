@@ -1124,9 +1124,10 @@ type DriveTeaserCounts struct {
 }
 
 type DriveThumbnailCounts struct {
-	Ready   int
-	Pending int
-	Failed  int
+	Ready           int
+	Pending         int
+	Failed          int
+	DurationPending int
 }
 
 type DriveFingerprintCounts struct {
@@ -1170,9 +1171,12 @@ func (c *Catalog) CountThumbnailsByDrive(ctx context.Context) (map[string]DriveT
 		`SELECT drive_id,
 		        COUNT(CASE WHEN COALESCE(thumbnail_url, '') != '' THEN 1 END) AS ready_count,
 		        COUNT(CASE WHEN COALESCE(thumbnail_url, '') = ''
-		                     AND COALESCE(thumbnail_status, 'pending') != 'failed' THEN 1 END) AS pending_count,
+		                     AND COALESCE(thumbnail_status, 'pending') NOT IN ('failed', 'skipped') THEN 1 END) AS pending_count,
 		        COUNT(CASE WHEN COALESCE(thumbnail_url, '') = ''
-		                     AND COALESCE(thumbnail_status, 'pending') = 'failed' THEN 1 END) AS failed_count
+		                     AND COALESCE(thumbnail_status, 'pending') = 'failed' THEN 1 END) AS failed_count,
+		        COUNT(CASE WHEN COALESCE(thumbnail_url, '') != ''
+		                     AND COALESCE(duration_seconds, 0) <= 0
+		                     AND COALESCE(thumbnail_status, 'pending') NOT IN ('failed', 'skipped') THEN 1 END) AS duration_pending_count
 		   FROM videos
 		  WHERE COALESCE(hidden, 0) = 0
 		    AND `+uniqueVideoWhereSQL+`
@@ -1186,7 +1190,7 @@ func (c *Catalog) CountThumbnailsByDrive(ctx context.Context) (map[string]DriveT
 	for rows.Next() {
 		var driveID string
 		var counts DriveThumbnailCounts
-		if err := rows.Scan(&driveID, &counts.Ready, &counts.Pending, &counts.Failed); err != nil {
+		if err := rows.Scan(&driveID, &counts.Ready, &counts.Pending, &counts.Failed, &counts.DurationPending); err != nil {
 			return nil, err
 		}
 		out[driveID] = counts

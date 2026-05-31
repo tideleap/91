@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -345,9 +346,15 @@ func (g *Generator) Probe(ctx context.Context, link *drives.StreamLink) (float64
 	args = append(args, ffmpegLink.URL)
 
 	cmd := exec.CommandContext(ctx2, g.cfg.FFprobePath, args...)
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return 0, ffmpegCommandError("ffprobe", err, out)
+		errOut := stderr.Bytes()
+		if len(errOut) == 0 {
+			errOut = out
+		}
+		return 0, ffmpegCommandError("ffprobe", err, errOut)
 	}
 	raw := strings.TrimSpace(string(out))
 	if raw == "" || raw == "N/A" {
@@ -1522,6 +1529,7 @@ func (w *ThumbWorker) process(ctx context.Context, v *catalog.Video) bool {
 		}
 	}
 	if current.ThumbnailURL != "" {
+		durationBackfillFailed := false
 		if current.DurationSeconds <= 0 {
 			link, err := w.streamLink(ctx, current)
 			if err != nil {
@@ -1529,9 +1537,17 @@ func (w *ThumbWorker) process(ctx context.Context, v *catalog.Video) bool {
 					return true
 				}
 				log.Printf("[thumb] probe streamURL %s: %v", current.Title, err)
+				durationBackfillFailed = true
 			} else if w.probeDuration(ctx, current, link) {
 				return true
+			} else if current.DurationSeconds <= 0 {
+				durationBackfillFailed = true
 			}
+		}
+		if durationBackfillFailed {
+			log.Printf("[thumb] skip duration backfill %s: thumbnail already exists but duration could not be probed", current.Title)
+			_ = w.Catalog.UpdateVideoMeta(ctx, current.ID, catalog.VideoMetaPatch{ThumbnailStatus: "skipped"})
+			return false
 		}
 		_ = w.Catalog.UpdateVideoMeta(ctx, current.ID, catalog.VideoMetaPatch{ThumbnailStatus: "ready"})
 		return false

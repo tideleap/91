@@ -1787,20 +1787,32 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 }
 
 func mountFrontend(r chi.Router) {
-	dir := strings.TrimSpace(os.Getenv("VIDEO_FRONTEND_DIR"))
-	if dir == "" {
-		dir = "./dist"
-	}
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		return
-	}
-	indexPath := filepath.Join(dir, "index.html")
-	if st, err := os.Stat(indexPath); err != nil || st.IsDir() {
+	dir, ok := resolveFrontendDir()
+	if !ok {
 		return
 	}
 	log.Printf("serving frontend from %s", dir)
 	r.NotFound(frontendHandler(dir))
+}
+
+func resolveFrontendDir() (string, bool) {
+	candidates := []string{}
+	if dir := strings.TrimSpace(os.Getenv("VIDEO_FRONTEND_DIR")); dir != "" {
+		candidates = append(candidates, dir)
+	} else {
+		candidates = append(candidates, "./dist", "../dist")
+	}
+	for _, dir := range candidates {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		indexPath := filepath.Join(dir, "index.html")
+		if st, err := os.Stat(indexPath); err == nil && !st.IsDir() {
+			return dir, true
+		}
+	}
+	return "", false
 }
 
 func frontendHandler(dir string) http.HandlerFunc {

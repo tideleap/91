@@ -90,6 +90,32 @@ func TestListVideosNeedingThumbnailIncludesExistingThumbnailMissingDuration(t *t
 	if count != 2 {
 		t.Fatalf("count = %d, want 2", count)
 	}
+
+	counts, err := cat.CountThumbnailsByDrive(ctx)
+	if err != nil {
+		t.Fatalf("count thumbnails by drive: %v", err)
+	}
+	if got := counts["drive"]; got.Ready != 2 || got.Pending != 1 || got.Failed != 1 || got.DurationPending != 1 {
+		t.Fatalf("thumbnail counts = %#v, want ready=2 pending=1 failed=1 durationPending=1", got)
+	}
+
+	if err := cat.UpdateVideoMeta(ctx, "duration-only", VideoMetaPatch{ThumbnailStatus: "skipped"}); err != nil {
+		t.Fatalf("mark duration-only skipped: %v", err)
+	}
+	count, err = cat.CountVideosNeedingThumbnail(ctx, "drive")
+	if err != nil {
+		t.Fatalf("count videos needing thumbnail after skip: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count after skip = %d, want 1", count)
+	}
+	counts, err = cat.CountThumbnailsByDrive(ctx)
+	if err != nil {
+		t.Fatalf("count thumbnails by drive after skip: %v", err)
+	}
+	if got := counts["drive"]; got.Ready != 2 || got.Pending != 1 || got.Failed != 1 || got.DurationPending != 0 {
+		t.Fatalf("thumbnail counts after skip = %#v, want ready=2 pending=1 failed=1 durationPending=0", got)
+	}
 }
 
 func TestCreateTagAndClassifyAddsTagToMatchingExistingVideos(t *testing.T) {
@@ -1111,11 +1137,12 @@ func TestReconcileThumbnailStatusOnce(t *testing.T) {
 		id, url, status string
 		wantStatus      string
 	}{
-		{"v-pending-url", "/p/thumb/v-pending-url", "pending", "ready"},         // 主要修复目标
-		{"v-empty-url-pending", "", "pending", "pending"},                       // 没 url 不动
-		{"v-failed-with-url", "/p/thumb/v-failed-with-url", "failed", "failed"}, // 显式失败保留
-		{"v-empty-url-failed", "", "failed", "failed"},                          // 失败 + 没 url 也保留
-		{"v-already-ready", "/p/thumb/v-already-ready", "ready", "ready"},       // 幂等
+		{"v-pending-url", "/p/thumb/v-pending-url", "pending", "ready"},             // 主要修复目标
+		{"v-empty-url-pending", "", "pending", "pending"},                           // 没 url 不动
+		{"v-failed-with-url", "/p/thumb/v-failed-with-url", "failed", "failed"},     // 显式失败保留
+		{"v-empty-url-failed", "", "failed", "failed"},                              // 失败 + 没 url 也保留
+		{"v-skipped-with-url", "/p/thumb/v-skipped-with-url", "skipped", "skipped"}, // 已跳过的时长补全保留
+		{"v-already-ready", "/p/thumb/v-already-ready", "ready", "ready"},           // 幂等
 	}
 	for _, c := range cases {
 		if err := cat.UpsertVideo(ctx, &Video{

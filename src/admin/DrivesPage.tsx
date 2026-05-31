@@ -498,6 +498,7 @@ export function DrivesPage() {
                       ready={d.thumbnailReadyCount}
                       pending={d.thumbnailPendingCount}
                       failed={d.thumbnailFailedCount}
+                      durationPending={d.thumbnailDurationPendingCount}
                     />
                   </div>
                 </div>
@@ -757,10 +758,12 @@ function GenerationCounts({
   ready,
   pending,
   failed,
+  durationPending,
 }: {
   ready?: number;
   pending?: number;
   failed?: number;
+  durationPending?: number;
 }) {
   return (
     <div className="admin-generation-counts">
@@ -773,6 +776,11 @@ function GenerationCounts({
       <span className="admin-drive-teaser__metric is-failed">
         失败 {failed ?? 0}
       </span>
+      {(durationPending ?? 0) > 0 && (
+        <span className="admin-drive-teaser__metric">
+          待补时长 {durationPending}
+        </span>
+      )}
     </div>
   );
 }
@@ -788,7 +796,7 @@ function GenerationStatusLine({
   const queueLength = status?.queueLength ?? 0;
   const detail = generationDetail(status);
   const title = generationTitle(status, detail);
-  const countText = queueLength > 0 ? `${label === "封面" ? "剩余" : "队列"} ${queueLength}` : "";
+  const countText = queueLength > 0 ? `${label === "封面" ? "待处理" : "队列"} ${queueLength}` : "";
 
   return (
     <div className="admin-generation-row" title={title}>

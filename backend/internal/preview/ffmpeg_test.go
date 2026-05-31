@@ -5,6 +5,8 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,6 +94,24 @@ func TestTinyVideoPreviewPlanUsesWholeVideoAsSingleSegment(t *testing.T) {
 	}
 	if plan.starts[0] != 0 {
 		t.Fatalf("start[0] = %.2f, want 0", plan.starts[0])
+	}
+}
+
+func TestProbeIgnoresStderrWarnings(t *testing.T) {
+	dir := t.TempDir()
+	ffprobePath := filepath.Join(dir, "ffprobe")
+	script := "#!/bin/sh\nprintf '%s\\n' 'h264 warning' >&2\nprintf '%s\\n' '364.800000'\n"
+	if err := os.WriteFile(ffprobePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write ffprobe stub: %v", err)
+	}
+
+	gen := New(Config{FFprobePath: ffprobePath})
+	got, err := gen.Probe(context.Background(), &drives.StreamLink{URL: filepath.Join(dir, "video.mp4")})
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if got != 364.8 {
+		t.Fatalf("duration = %v, want 364.8", got)
 	}
 }
 
