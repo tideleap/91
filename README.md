@@ -130,7 +130,7 @@ docker compose up -d
 如果想固定某个 Release 版本，可以改成明确的 tag，例如：
 
 ```yaml
-image: ghcr.io/nianzhibai/91:v0.0.4
+image: ghcr.io/nianzhibai/91:v0.0.6
 ```
 
 或直接拉取仓库内置配置：
