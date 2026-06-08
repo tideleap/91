@@ -25,6 +25,8 @@ type Scanner struct {
 	SkipDirIDs map[string]struct{}
 	// 回调：新视频被加入后触发预览视频生成
 	OnNewVideo func(v *catalog.Video)
+	// OnProgress 在扫描进度变化时触发。回调只应读取 Stats 里的计数，不应修改 map 字段。
+	OnProgress func(stats Stats)
 	// ProgressInterval 控制扫描内部 heartbeat 的最小输出间隔。
 	// 0 → 默认 30s；< 0 → 关闭 heartbeat（仅留外层 start / done 两行）。
 	// heartbeat 单行格式：
@@ -91,6 +93,9 @@ func (s *Scanner) Run(ctx context.Context, startDirID string) (Stats, error) {
 		driveID = s.Drive.ID()
 	}
 	progress := func(currentDir string) {
+		if s.OnProgress != nil {
+			s.OnProgress(stats)
+		}
 		if interval < 0 {
 			return
 		}
@@ -149,7 +154,6 @@ func (s *Scanner) walk(ctx context.Context, dirID, dirName string, stats *Stats,
 			continue
 		}
 
-		stats.Scanned++
 		ext := strings.ToLower(path.Ext(e.Name))
 		if !s.Exts[ext] {
 			continue
@@ -157,6 +161,8 @@ func (s *Scanner) walk(ctx context.Context, dirID, dirName string, stats *Stats,
 		if e.Size <= 0 {
 			continue
 		}
+		stats.Scanned++
+		progress(dirName)
 		stats.SeenFileIDs[e.ID] = struct{}{}
 
 		id := s.Drive.Kind() + "-" + s.Drive.ID() + "-" + e.ID
@@ -266,6 +272,7 @@ func (s *Scanner) walk(ctx context.Context, dirID, dirName string, stats *Stats,
 			return err
 		}
 		stats.Added++
+		progress(dirName)
 		if s.OnNewVideo != nil {
 			s.OnNewVideo(v)
 		}

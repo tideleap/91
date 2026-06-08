@@ -707,6 +707,18 @@ func TestSpider91CookieHeader(t *testing.T) {
 	}
 }
 
+func TestSpider91ProgressLogLineClassifiers(t *testing.T) {
+	if !isSpider91CheckedVideoLogLine("[2026-06-08 16:49:17]   处理视频 3/24: 标题") {
+		t.Fatal("checked video log line was not recognized")
+	}
+	if isSpider91CheckedVideoLogLine("[2026-06-08 16:49:17] [页 2] 发现 24 个视频") {
+		t.Fatal("page summary log line should not count as checked video")
+	}
+	if !isSpider91ExtractedVideoLogLine("[2026-06-08 16:49:39]   [OK] 成功提取视频直链") {
+		t.Fatal("extracted video log line was not recognized")
+	}
+}
+
 func spider91DetailHTML(videoURL string) string {
 	fragment := `<video><source src="` + videoURL + `" type="video/mp4"></video>`
 	return `document.write(strencode2("` + url.PathEscape(fragment) + `"));`

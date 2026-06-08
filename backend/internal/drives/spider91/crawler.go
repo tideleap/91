@@ -64,6 +64,12 @@ type CrawlerConfig struct {
 
 	// OnNewVideo 是新视频成功入库后的回调，用于触发预览视频 worker。
 	OnNewVideo func(v *catalog.Video)
+	// OnProgress 在抓取统计变化时触发，用于后台管理页展示实时进度。
+	OnProgress func(progress CrawlProgress)
+	// OnCheckedVideo 在 Python 爬虫开始检查一个列表页视频时触发。
+	OnCheckedVideo func()
+	// OnExtractedVideo 在 Python 爬虫提取到一个新视频直链时触发。
+	OnExtractedVideo func()
 }
 
 // Crawler 把 Python 爬虫产出包装成 catalog 入库流程。
@@ -219,6 +225,16 @@ type CrawlResult struct {
 	SeenFile     string
 }
 
+// CrawlProgress 是 RunOnce 过程中可安全对外发布的实时计数。
+type CrawlProgress struct {
+	TargetNew    int
+	TotalEntries int
+	NewVideos    int
+	Skipped      int
+	Failed       int
+	SeenSnapshot int
+}
+
 // spiderVideoEntry 对应 spider_91porn.py 输出 JSON 中的单条视频。
 type spiderVideoEntry struct {
 	Title     string `json:"title"`
@@ -266,6 +282,20 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 
 	result := &CrawlResult{TargetNew: targetNew, StartedAt: time.Now()}
 	defer func() { result.FinishedAt = time.Now() }()
+	emitProgress := func() {
+		if c.cfg.OnProgress == nil {
+			return
+		}
+		c.cfg.OnProgress(CrawlProgress{
+			TargetNew:    result.TargetNew,
+			TotalEntries: result.TotalEntries,
+			NewVideos:    result.NewVideos,
+			Skipped:      result.Skipped,
+			Failed:       result.Failed,
+			SeenSnapshot: result.SeenSnapshot,
+		})
+	}
+	emitProgress()
 
 	// 1. 准备 .crawl/ 目录 + 已知源视频 ID 列表
 	//
@@ -291,6 +321,7 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 		return result, fmt.Errorf("spider91 crawler: build seen list: %w", err)
 	}
 	result.SeenSnapshot = seenCount
+	emitProgress()
 
 	// 2-3. 启动 Python 爬虫（流式 stdout 协议），并边读边处理。
 	//
@@ -321,9 +352,11 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 			continue
 		}
 		result.TotalEntries++
+		emitProgress()
 		sourceID := sourceIDForItem(item)
 		if sourceID == "" || strings.TrimSpace(item.VideoURL) == "" {
 			result.Failed++
+			emitProgress()
 			continue
 		}
 		if result.NewVideos >= targetNew {
@@ -335,22 +368,27 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 		if err != nil {
 			log.Printf("[spider91] drive=%s viewkey=%s source_id=%s check deleted: %v", c.cfg.Driver.ID(), item.Viewkey, sourceID, err)
 			result.Failed++
+			emitProgress()
 			continue
 		}
 		if deleted {
 			result.Skipped++
+			emitProgress()
 			continue
 		}
 		if existing, _ := c.cfg.Catalog.GetVideo(ctx, videoID); existing != nil {
 			result.Skipped++
+			emitProgress()
 			continue
 		}
 		if perr := c.processOne(ctx, videoID, item); perr != nil {
 			log.Printf("[spider91] drive=%s viewkey=%s source_id=%s failed: %v", c.cfg.Driver.ID(), item.Viewkey, sourceID, perr)
 			result.Failed++
+			emitProgress()
 			continue
 		}
 		result.NewVideos++
+		emitProgress()
 	}
 	if scerr := scanner.Err(); scerr != nil {
 		log.Printf("[spider91] drive=%s stdout scan: %v", c.cfg.Driver.ID(), scerr)
@@ -458,12 +496,12 @@ func (c *Crawler) startSpiderTargetNew(ctx context.Context, targetNew int, seenP
 		return nil, nil, fmt.Errorf("start: %w", err)
 	}
 	// stderr 转发到 backend log。子进程退出时 reader 自动 EOF，goroutine 自然结束。
-	go forwardSpiderLog(c.cfg.Driver.ID(), stderr)
+	go forwardSpiderLog(c.cfg.Driver.ID(), stderr, c.cfg.OnCheckedVideo, c.cfg.OnExtractedVideo)
 	return cmd, stdout, nil
 }
 
 // forwardSpiderLog 把 Python stderr 逐行转发到 backend log，便于调试。
-func forwardSpiderLog(driveID string, r io.Reader) {
+func forwardSpiderLog(driveID string, r io.Reader, onCheckedVideo func(), onExtractedVideo func()) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -472,7 +510,21 @@ func forwardSpiderLog(driveID string, r io.Reader) {
 			continue
 		}
 		log.Printf("[spider91:py] drive=%s %s", driveID, line)
+		if onCheckedVideo != nil && isSpider91CheckedVideoLogLine(line) {
+			onCheckedVideo()
+		}
+		if onExtractedVideo != nil && isSpider91ExtractedVideoLogLine(line) {
+			onExtractedVideo()
+		}
 	}
+}
+
+func isSpider91CheckedVideoLogLine(line string) bool {
+	return checkedVideoLogRE.MatchString(line)
+}
+
+func isSpider91ExtractedVideoLogLine(line string) bool {
+	return strings.Contains(line, "[OK] 成功提取视频直链")
 }
 
 // processOne 处理单个 91 源视频：下载视频 + 封面 + 复制封面 + 入库。
@@ -847,9 +899,10 @@ func spider91CookieHeader(cookies []*http.Cookie) string {
 }
 
 var (
-	strencode2RE = regexp.MustCompile(`strencode2\(["']([^"']+)["']\)`)
-	srcAttrRE    = regexp.MustCompile(`src=['"]([^'"]+)['"]`)
-	mp4URLRE     = regexp.MustCompile(`https?://[^\s"'<>]+\.mp4[^\s"'<>]*`)
+	checkedVideoLogRE = regexp.MustCompile(`处理视频\s+\d+/\d+:`)
+	strencode2RE      = regexp.MustCompile(`strencode2\(["']([^"']+)["']\)`)
+	srcAttrRE         = regexp.MustCompile(`src=['"]([^'"]+)['"]`)
+	mp4URLRE          = regexp.MustCompile(`https?://[^\s"'<>]+\.mp4[^\s"'<>]*`)
 )
 
 func parseSpider91VideoURL(html string) string {

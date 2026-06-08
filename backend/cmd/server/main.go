@@ -170,16 +170,15 @@ func main() {
 		OnDriveRemoved: func(driveID string) {
 			app.detachDrive(driveID)
 		},
-		OnScanRequested: func(driveID string) {
+		OnScanRequested: func(driveID string) bool {
 			// spider91 的"重扫"等同于手动触发一次爬取；其它 drive 走标准 scan
 			app.mu.Lock()
 			_, isSpider91 := app.spider91Crawlers[driveID]
 			app.mu.Unlock()
 			if isSpider91 {
-				app.scheduleSpider91Crawl(ctx, driveID)
-				return
+				return app.scheduleSpider91Crawl(ctx, driveID)
 			}
-			app.scheduleScan(ctx, driveID)
+			return app.scheduleScan(ctx, driveID)
 		},
 		OnStopDriveTasks: func(driveID string) bool {
 			return app.stopDriveTasks(ctx, driveID)
@@ -318,29 +317,20 @@ type App struct {
 	// 空字符串表示本地保存不上传，不再自动挑选 pikpak/p115/p123/onedrive drive。
 	spider91UploadDriveID string
 
-	// spider91Migrator 周期把 spider91 视频上传到目标 drive（PikPak、115、123 或 OneDrive）。
-	spider91Migrator *spider91migrate.Migrator
+	// spider91Migrator 把 spider91 视频上传到目标 drive（PikPak、115、123 或 OneDrive）。
+	spider91Migrator spider91MigrationRunner
 
 	// nightlyRunner 是凌晨流水线调度器：每天 cron_hour 串行跑扫盘 → 91 爬虫 → 迁移。
 	// 也响应 admin 「扫描所有网盘」按钮（TriggerNow）。
 	nightlyRunner *nightly.Runner
 
-	// scanGlobalMu 串行化所有云盘扫盘任务，确保同一时刻全系统只有一个扫盘
-	// 在跑（包括 admin 手动重扫和 nightly Phase 1）。即便用户同时点多个 drive
-	// 的"重扫"按钮，goroutine 也会排队等这把锁，逐个执行。
-	//
-	// 设计取舍：
-	//   - 不同 drive 的扫盘技术上可以并行（互不干涉），但用户希望"线性来"以
-	//     避免带宽 / CPU 抢占，所以做全局串行。
-	//   - nightly Phase 1 已经是 for 循环顺序调用 runScan，加了这把锁后行为
-	//     不变，只是顺手把 admin 异步触发的请求也接入同一条队列。
-	scanGlobalMu sync.Mutex
-	// scanQueueMu 保护 scanQueued。
+	// scanQueueMu 保护 scanQueued 和 scanProgress。
 	scanQueueMu sync.Mutex
 	// scanQueued 跟踪哪些 driveID 已经排队或正在跑扫盘/91 爬取，去重后续重复点击。
-	// 一个 drive 在 scheduleScan/scheduleSpider91Crawl 入队时被加入，后台 goroutine
-	// 结束时被移除。
+	// 不同 drive 互不等待，可以并行扫；同一个 drive 只能有一个扫盘/抓取任务。
 	scanQueued map[string]bool
+	// scanProgress 跟踪每个正在扫盘/抓取的 drive 当前进度。
+	scanProgress map[string]driveScanProgress
 
 	// taskCancelMu 保护 driveTaskCancels。这里登记的是可被"停止任务"按钮中断
 	// 的 drive 级任务上下文：扫盘、91 爬取、指纹补队列、失败生成重试等。
@@ -352,6 +342,15 @@ type App struct {
 	// reconcile 和扫盘结束同时为同一批 pending 视频启动多个长时间入队 goroutine。
 	fingerprintQueueMu  sync.Mutex
 	fingerprintQueueing map[string]bool
+}
+
+type driveScanProgress struct {
+	Scanned int
+	Added   int
+}
+
+type spider91MigrationRunner interface {
+	RunOnce(ctx context.Context) error
 }
 
 // teaserEnabledForDrive 查询某个 drive 当前的 per-drive 预览视频开关。
@@ -491,6 +490,17 @@ func (a *App) loadSpider91UploadDriveID(ctx context.Context) {
 }
 
 func (a *App) driveGenerationStatuses() map[string]api.DriveGenerationStatuses {
+	a.scanQueueMu.Lock()
+	scanningDrives := make(map[string]bool, len(a.scanQueued))
+	for id, running := range a.scanQueued {
+		scanningDrives[id] = running
+	}
+	scanProgresses := make(map[string]driveScanProgress, len(a.scanProgress))
+	for id, progress := range a.scanProgress {
+		scanProgresses[id] = progress
+	}
+	a.scanQueueMu.Unlock()
+
 	a.mu.Lock()
 	previewWorkers := make(map[string]*preview.Worker, len(a.workers))
 	for id, worker := range a.workers {
@@ -506,7 +516,20 @@ func (a *App) driveGenerationStatuses() map[string]api.DriveGenerationStatuses {
 	}
 	a.mu.Unlock()
 
-	out := make(map[string]api.DriveGenerationStatuses, len(previewWorkers)+len(thumbWorkers)+len(fingerprintWorkers))
+	out := make(map[string]api.DriveGenerationStatuses, len(scanningDrives)+len(previewWorkers)+len(thumbWorkers)+len(fingerprintWorkers))
+	for id, running := range scanningDrives {
+		if !running {
+			continue
+		}
+		progress := scanProgresses[id]
+		status := out[id]
+		status.Scan = api.GenerationStatus{
+			State:        "scanning",
+			ScannedCount: progress.Scanned,
+			AddedCount:   progress.Added,
+		}
+		out[id] = status
+	}
 	for id, worker := range previewWorkers {
 		status := out[id]
 		status.Preview = generationStatusFromPreview(worker.Status())
@@ -856,6 +879,12 @@ func (a *App) attachSpider91Crawler(d *catalog.Drive, drv *spider91.Driver) {
 	proxyURL := strings.TrimSpace(d.Credentials["proxy"])
 
 	driveID := d.ID
+	var progressMu sync.Mutex
+	checkedVideos := 0
+	expectedNewVideos := 0
+	updateProgress := func(scanned, added int) {
+		a.updateDriveScanProgress(driveID, scanned, added)
+	}
 	c := spider91.NewCrawler(spider91.CrawlerConfig{
 		Driver:         drv,
 		Catalog:        a.cat,
@@ -864,6 +893,35 @@ func (a *App) attachSpider91Crawler(d *catalog.Drive, drv *spider91.Driver) {
 		WorkDir:        filepath.Dir(scriptPath),
 		CommonThumbDir: a.commonThumbsDir(),
 		ProxyURL:       proxyURL,
+		OnProgress: func(progress spider91.CrawlProgress) {
+			progressMu.Lock()
+			if progress.TotalEntries == 0 && progress.NewVideos == 0 && progress.Skipped == 0 && progress.Failed == 0 {
+				checkedVideos = 0
+				expectedNewVideos = 0
+			} else if progress.TotalEntries > expectedNewVideos {
+				expectedNewVideos = progress.TotalEntries
+			}
+			scanned := checkedVideos
+			added := expectedNewVideos
+			progressMu.Unlock()
+			updateProgress(scanned, added)
+		},
+		OnCheckedVideo: func() {
+			progressMu.Lock()
+			checkedVideos++
+			scanned := checkedVideos
+			added := expectedNewVideos
+			progressMu.Unlock()
+			updateProgress(scanned, added)
+		},
+		OnExtractedVideo: func() {
+			progressMu.Lock()
+			expectedNewVideos++
+			scanned := checkedVideos
+			added := expectedNewVideos
+			progressMu.Unlock()
+			updateProgress(scanned, added)
+		},
 		// 新流程：预览视频不在每条视频入库时立即入队，而是 RunOnce 全部下完后由
 		// runSpider91Crawl 统一调 enqueueDriveGeneration 一次性入队。这样：
 		//   - 下载阶段不和 ffmpeg 抢 CPU/IO
@@ -1008,6 +1066,7 @@ func (a *App) clearQueuedDriveTask(driveID string) bool {
 	a.scanQueueMu.Lock()
 	queued := a.scanQueued[driveID]
 	delete(a.scanQueued, driveID)
+	delete(a.scanProgress, driveID)
 	a.scanQueueMu.Unlock()
 	return queued
 }
@@ -1019,6 +1078,7 @@ func (a *App) clearAllQueuedDriveTasks() []string {
 		ids = append(ids, id)
 	}
 	a.scanQueued = nil
+	a.scanProgress = nil
 	a.scanQueueMu.Unlock()
 	return ids
 }
@@ -1040,6 +1100,102 @@ func (a *App) clearAllFingerprintQueueing() []string {
 	a.fingerprintQueueing = nil
 	a.fingerprintQueueMu.Unlock()
 	return ids
+}
+
+func (a *App) beginDriveScanOrCrawl(driveID string) bool {
+	driveID = strings.TrimSpace(driveID)
+	if driveID == "" {
+		return false
+	}
+	a.scanQueueMu.Lock()
+	defer a.scanQueueMu.Unlock()
+	if a.scanQueued == nil {
+		a.scanQueued = make(map[string]bool)
+	}
+	if a.scanQueued[driveID] {
+		return false
+	}
+	a.scanQueued[driveID] = true
+	if a.scanProgress == nil {
+		a.scanProgress = make(map[string]driveScanProgress)
+	}
+	a.scanProgress[driveID] = driveScanProgress{}
+	return true
+}
+
+func (a *App) endDriveScanOrCrawl(driveID string) {
+	a.scanQueueMu.Lock()
+	delete(a.scanQueued, driveID)
+	delete(a.scanProgress, driveID)
+	a.scanQueueMu.Unlock()
+}
+
+func (a *App) updateDriveScanProgress(driveID string, scanned, added int) {
+	driveID = strings.TrimSpace(driveID)
+	if driveID == "" {
+		return
+	}
+	a.scanQueueMu.Lock()
+	if a.scanQueued[driveID] {
+		if a.scanProgress == nil {
+			a.scanProgress = make(map[string]driveScanProgress)
+		}
+		a.scanProgress[driveID] = driveScanProgress{Scanned: scanned, Added: added}
+	}
+	a.scanQueueMu.Unlock()
+}
+
+func (a *App) driveHasActiveWork(driveID string) bool {
+	driveID = strings.TrimSpace(driveID)
+	if driveID == "" {
+		return true
+	}
+
+	a.scanQueueMu.Lock()
+	scanning := a.scanQueued[driveID]
+	a.scanQueueMu.Unlock()
+	if scanning {
+		return true
+	}
+
+	a.taskCancelMu.Lock()
+	taskContexts := len(a.driveTaskCancels[driveID])
+	a.taskCancelMu.Unlock()
+	if taskContexts > 0 {
+		return true
+	}
+
+	a.fingerprintQueueMu.Lock()
+	fingerprintQueueing := a.fingerprintQueueing[driveID]
+	a.fingerprintQueueMu.Unlock()
+	if fingerprintQueueing {
+		return true
+	}
+
+	a.mu.Lock()
+	previewWorker := a.workers[driveID]
+	thumbWorker := a.thumbWorkers[driveID]
+	fingerprintWorker := a.fingerprintWorkers[driveID]
+	a.mu.Unlock()
+
+	if previewTaskBusy(thumbWorker.Status()) {
+		return true
+	}
+	if previewTaskBusy(previewWorker.Status()) {
+		return true
+	}
+	if fingerprintTaskBusy(fingerprintWorker.Status()) {
+		return true
+	}
+	return false
+}
+
+func previewTaskBusy(status preview.TaskStatus) bool {
+	return status.State != "" && status.State != "idle"
+}
+
+func fingerprintTaskBusy(status fingerprint.TaskStatus) bool {
+	return status.State != "" && status.State != "idle"
 }
 
 func (a *App) resetDriveGenerationWorkers(ctx context.Context, driveID string) bool {
@@ -1355,52 +1511,41 @@ func (a *App) listDriveDirChildren(ctx context.Context, driveID, parentID string
 
 // scheduleScan 异步触发某个 drive 的扫盘。
 //
-// 调用立即返回；扫盘任务在后台 goroutine 里排队执行 —— 系统中所有扫盘共享
-// 一把 scanGlobalMu，按提交顺序串行跑。
-//
-// 去重：如果该 drive 已经在排队或正在跑，重复请求会被丢弃并记日志。这样用户
-// 反复点同一个 drive 的"重扫"按钮，也只会有一次实际工作。
-//
-// 用于 admin UI「重扫」、「立即抓取」这类异步触发；nightly Phase 1 应继续直接
-// 调 runScan（同步、按 for 循环顺序），不需要走 scheduleScan。
-func (a *App) scheduleScan(ctx context.Context, driveID string) {
-	taskCtx, done := a.registerDriveTaskContext(ctx, driveID)
-	a.scanQueueMu.Lock()
-	if a.scanQueued == nil {
-		a.scanQueued = make(map[string]bool)
+// 调用立即返回。不同 drive 的扫盘可以并行；同一个 drive 如果已有扫盘、封面、
+// 预览视频或指纹任务在跑，本次请求会被拒绝。
+func (a *App) scheduleScan(ctx context.Context, driveID string) bool {
+	if a.driveHasActiveWork(driveID) {
+		log.Printf("[scan] drive=%s has active work, skip duplicate request", driveID)
+		return false
 	}
-	if a.scanQueued[driveID] {
-		a.scanQueueMu.Unlock()
-		done()
+	if !a.beginDriveScanOrCrawl(driveID) {
 		log.Printf("[scan] drive=%s already queued or running, skip duplicate request", driveID)
-		return
+		return false
 	}
-	a.scanQueued[driveID] = true
-	a.scanQueueMu.Unlock()
+	taskCtx, done := a.registerDriveTaskContext(ctx, driveID)
 
 	go func() {
 		defer func() {
-			a.scanQueueMu.Lock()
-			delete(a.scanQueued, driveID)
-			a.scanQueueMu.Unlock()
+			a.endDriveScanOrCrawl(driveID)
 			done()
 		}()
 		a.runScanWithTaskContext(taskCtx, driveID)
 	}()
+	return true
 }
 
 func (a *App) runScan(ctx context.Context, driveID string) {
+	if !a.beginDriveScanOrCrawl(driveID) {
+		log.Printf("[scan] drive=%s already queued or running, skip direct scan", driveID)
+		return
+	}
+	defer a.endDriveScanOrCrawl(driveID)
 	taskCtx, done := a.registerDriveTaskContext(ctx, driveID)
 	defer done()
 	a.runScanWithTaskContext(taskCtx, driveID)
 }
 
 func (a *App) runScanWithTaskContext(ctx context.Context, driveID string) {
-	// 全局串行：同一时刻只有一个扫盘任务在跑（admin 重扫 + nightly Phase 1 共用）。
-	// 等待这把锁的 goroutine 在排队，按到达顺序逐个执行。
-	a.scanGlobalMu.Lock()
-	defer a.scanGlobalMu.Unlock()
-
 	if err := ctx.Err(); err != nil {
 		log.Printf("[scan] drive=%s canceled before start: %v", driveID, err)
 		return
@@ -1438,6 +1583,9 @@ func (a *App) runScanWithTaskContext(ctx context.Context, driveID string) {
 		return
 	}
 	sc := scanner.New(a.cat, drv, a.cfg.Scanner.VideoExtensions, d.SkipDirIDs, onNew)
+	sc.OnProgress = func(stats scanner.Stats) {
+		a.updateDriveScanProgress(driveID, stats.Scanned, stats.Added)
+	}
 
 	startID := d.RootID
 
@@ -2310,30 +2458,27 @@ func shouldScanDrive(d drives.Drive) bool {
 
 // ---------- spider91 crawl ----------
 
-func (a *App) scheduleSpider91Crawl(ctx context.Context, driveID string) {
-	taskCtx, done := a.registerDriveTaskContext(ctx, driveID)
-	a.scanQueueMu.Lock()
-	if a.scanQueued == nil {
-		a.scanQueued = make(map[string]bool)
+func (a *App) scheduleSpider91Crawl(ctx context.Context, driveID string) bool {
+	if a.driveHasActiveWork(driveID) {
+		log.Printf("[spider91] drive=%s has active work, skip duplicate crawl request", driveID)
+		return false
 	}
-	if a.scanQueued[driveID] {
-		a.scanQueueMu.Unlock()
-		done()
+	if !a.beginDriveScanOrCrawl(driveID) {
 		log.Printf("[spider91] drive=%s already queued or running, skip duplicate crawl request", driveID)
-		return
+		return false
 	}
-	a.scanQueued[driveID] = true
-	a.scanQueueMu.Unlock()
+	taskCtx, done := a.registerDriveTaskContext(ctx, driveID)
 
 	go func() {
 		defer func() {
-			a.scanQueueMu.Lock()
-			delete(a.scanQueued, driveID)
-			a.scanQueueMu.Unlock()
+			a.endDriveScanOrCrawl(driveID)
 			done()
 		}()
-		a.runSpider91CrawlWithTaskContext(taskCtx, driveID)
+		if a.runSpider91CrawlWithTaskContext(taskCtx, driveID) {
+			a.runSpider91MigrationAfterManualCrawl(taskCtx, driveID)
+		}
 	}()
+	return true
 }
 
 // runSpider91Crawl 运行一次完整爬取流程并把 last_crawl_at 写回 drive.credentials。
@@ -2342,15 +2487,20 @@ func (a *App) scheduleSpider91Crawl(ctx context.Context, driveID string) {
 // 流水线重跑时仍会重试。该方法是阻塞的，被 nightly Phase 2 串行调用，以及被
 // admin "立即抓取" 单 drive 异步调用。
 func (a *App) runSpider91Crawl(ctx context.Context, driveID string) {
+	if !a.beginDriveScanOrCrawl(driveID) {
+		log.Printf("[spider91] drive=%s already queued or running, skip direct crawl", driveID)
+		return
+	}
+	defer a.endDriveScanOrCrawl(driveID)
 	taskCtx, done := a.registerDriveTaskContext(ctx, driveID)
 	defer done()
 	a.runSpider91CrawlWithTaskContext(taskCtx, driveID)
 }
 
-func (a *App) runSpider91CrawlWithTaskContext(ctx context.Context, driveID string) {
+func (a *App) runSpider91CrawlWithTaskContext(ctx context.Context, driveID string) bool {
 	if err := ctx.Err(); err != nil {
 		log.Printf("[spider91] drive=%s crawl canceled before start: %v", driveID, err)
-		return
+		return false
 	}
 	a.mu.Lock()
 	c := a.spider91Crawlers[driveID]
@@ -2358,21 +2508,21 @@ func (a *App) runSpider91CrawlWithTaskContext(ctx context.Context, driveID strin
 	if c == nil {
 		if err := a.ensureDriveAttached(ctx, driveID); err != nil {
 			log.Printf("[spider91] drive=%s attach failed: %v", driveID, err)
-			return
+			return false
 		}
 		a.mu.Lock()
 		c = a.spider91Crawlers[driveID]
 		a.mu.Unlock()
 		if c == nil {
 			log.Printf("[spider91] drive=%s crawler not attached", driveID)
-			return
+			return false
 		}
 	}
 
 	d, err := a.cat.GetDrive(ctx, driveID)
 	if err != nil || d == nil {
 		log.Printf("[spider91] drive=%s lookup failed: %v", driveID, err)
-		return
+		return false
 	}
 	targetNew := spider91IntCred(d, "target_new", spider91.DefaultTargetNew)
 	if targetNew <= 0 {
@@ -2406,7 +2556,7 @@ func (a *App) runSpider91CrawlWithTaskContext(ctx context.Context, driveID strin
 	}
 	if err := ctx.Err(); err != nil {
 		log.Printf("[spider91] drive=%s crawl canceled after run: %v", driveID, err)
-		return
+		return false
 	}
 
 	// 爬取全部完成后，统一把所有还 pending 的预览视频入队。
@@ -2421,6 +2571,35 @@ func (a *App) runSpider91CrawlWithTaskContext(ctx context.Context, driveID strin
 	a.mu.Unlock()
 	a.scheduleFingerprintBackfill(ctx, driveID, fingerprintWorker)
 	a.enqueueDriveGeneration(ctx, driveID, worker, thumbWorker)
+	return runErr == nil
+}
+
+func (a *App) runSpider91MigrationAfterManualCrawl(ctx context.Context, driveID string) {
+	if err := ctx.Err(); err != nil {
+		log.Printf("[spider91] drive=%s skip post-crawl migration: %v", driveID, err)
+		return
+	}
+	targetDriveID := a.Spider91UploadDriveID()
+	if targetDriveID == "" {
+		return
+	}
+	if a.spider91Migrator == nil {
+		log.Printf("[spider91] drive=%s skip post-crawl migration: migrator not configured", driveID)
+		return
+	}
+	log.Printf("[spider91] drive=%s waiting for generation queues before post-crawl migration target=%s", driveID, targetDriveID)
+	if err := a.waitAllPreviewQueuesIdle(ctx); err != nil {
+		log.Printf("[spider91] drive=%s post-crawl migration wait canceled: %v", driveID, err)
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		log.Printf("[spider91] drive=%s skip post-crawl migration after wait: %v", driveID, err)
+		return
+	}
+	log.Printf("[spider91] drive=%s running post-crawl migration target=%s", driveID, targetDriveID)
+	if err := a.spider91Migrator.RunOnce(ctx); err != nil {
+		log.Printf("[spider91] drive=%s post-crawl migration: %v", driveID, err)
+	}
 }
 
 // spider91IntCred 解析 credentials 中的整数字段，缺省时返回 def。

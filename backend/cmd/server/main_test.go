@@ -260,6 +260,7 @@ func TestStopDriveTasksCancelsQueuedTasksAndReplacesWorkers(t *testing.T) {
 			"drive-id": func() { close(oldCanceled) },
 		},
 		scanQueued:          map[string]bool{"drive-id": true},
+		scanProgress:        map[string]driveScanProgress{"drive-id": {Scanned: 8, Added: 2}},
 		fingerprintQueueing: map[string]bool{"drive-id": true},
 	}
 	taskCtx, done := app.registerDriveTaskContext(ctx, "drive-id")
@@ -278,6 +279,9 @@ func TestStopDriveTasksCancelsQueuedTasksAndReplacesWorkers(t *testing.T) {
 	}
 	if app.scanQueued["drive-id"] {
 		t.Fatal("scan queue marker was not cleared")
+	}
+	if _, ok := app.scanProgress["drive-id"]; ok {
+		t.Fatal("scan progress marker was not cleared")
 	}
 	if app.fingerprintQueueing["drive-id"] {
 		t.Fatal("fingerprint queue marker was not cleared")
@@ -302,6 +306,117 @@ func TestStopDriveTasksCancelsQueuedTasksAndReplacesWorkers(t *testing.T) {
 		t.Fatalf("replacement worker cancel was not registered")
 	}
 	newCancel()
+}
+
+func TestScheduleScanRejectsDriveWithActiveGenerationWork(t *testing.T) {
+	ctx := context.Background()
+	thumbWorker := preview.NewThumbWorker(&serverFakeTeaserGenerator{}, nil, &serverFakeDrive{})
+	if !thumbWorker.Enqueue(&catalog.Video{ID: "busy-video", DriveID: "drive-id", Title: "Busy Video"}) {
+		t.Fatal("failed to enqueue busy thumbnail task")
+	}
+	app := &App{
+		thumbWorkers: map[string]*preview.ThumbWorker{"drive-id": thumbWorker},
+	}
+
+	if app.scheduleScan(ctx, "drive-id") {
+		t.Fatal("scheduleScan accepted a drive with active generation work")
+	}
+}
+
+func TestScheduleScanRunsDifferentDrivesConcurrently(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+	seedDriveWithTeaser(t, cat, "drive-a", true)
+	seedDriveWithTeaser(t, cat, "drive-b", true)
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	registry := proxy.NewRegistry()
+	registry.Set("drive-a", &serverBlockingListDrive{id: "drive-a", started: started, release: release})
+	registry.Set("drive-b", &serverBlockingListDrive{id: "drive-b", started: started, release: release})
+
+	app := &App{
+		cfg: &config.Config{
+			Scanner: config.Scanner{VideoExtensions: []string{".mp4"}},
+		},
+		cat:      cat,
+		registry: registry,
+	}
+
+	if !app.scheduleScan(ctx, "drive-a") {
+		t.Fatal("scheduleScan drive-a was rejected")
+	}
+	if !app.scheduleScan(ctx, "drive-b") {
+		t.Fatal("scheduleScan drive-b was rejected")
+	}
+
+	seen := map[string]struct{}{}
+	deadline := time.After(time.Second)
+	for len(seen) < 2 {
+		select {
+		case id := <-started:
+			seen[id] = struct{}{}
+		case <-deadline:
+			close(release)
+			t.Fatalf("started drives = %#v, want both drives before releasing List", seen)
+		}
+	}
+	close(release)
+}
+
+func TestDriveGenerationStatusIncludesScanState(t *testing.T) {
+	app := &App{
+		scanQueued:   map[string]bool{"drive-id": true},
+		scanProgress: map[string]driveScanProgress{"drive-id": {Scanned: 12, Added: 3}},
+	}
+
+	status := app.driveGenerationStatuses()["drive-id"].Scan
+	if status.State != "scanning" {
+		t.Fatalf("scan status = %#v, want scanning", status)
+	}
+	if status.ScannedCount != 12 || status.AddedCount != 3 {
+		t.Fatalf("scan counts = scanned %d added %d, want 12 and 3", status.ScannedCount, status.AddedCount)
+	}
+}
+
+func TestRunSpider91MigrationAfterManualCrawlRequiresConfiguredUploadTarget(t *testing.T) {
+	ctx := context.Background()
+	registry := proxy.NewRegistry()
+	migrator := &serverFakeSpider91MigrationRunner{}
+	app := &App{
+		registry:           registry,
+		spider91Migrator:   migrator,
+		workers:            map[string]*preview.Worker{},
+		thumbWorkers:       map[string]*preview.ThumbWorker{},
+		fingerprintWorkers: map[string]*fingerprint.Worker{},
+	}
+
+	app.runSpider91MigrationAfterManualCrawl(ctx, "91spider")
+	if migrator.called != 0 {
+		t.Fatalf("migration called without upload target")
+	}
+
+	app.spider91UploadDriveID = "pikpak"
+	app.runSpider91MigrationAfterManualCrawl(ctx, "91spider")
+	if migrator.called != 0 {
+		t.Fatalf("migration called when upload target is not attached")
+	}
+
+	registry.Set("pikpak", &serverFakeKindDrive{id: "pikpak", kind: "pikpak"})
+	app.runSpider91MigrationAfterManualCrawl(ctx, "91spider")
+	if migrator.called != 1 {
+		t.Fatalf("migration calls = %d, want 1", migrator.called)
+	}
 }
 
 func TestDriveGenerationStatusUsesWorkerQueueNotPendingCatalogRows(t *testing.T) {
@@ -1495,6 +1610,63 @@ func (d *serverFakeDrive) EnsureDir(context.Context, string) (string, error) {
 	return "", drives.ErrNotSupported
 }
 func (d *serverFakeDrive) RootID() string { return "root" }
+
+type serverFakeKindDrive struct {
+	serverFakeDrive
+	id   string
+	kind string
+}
+
+func (d *serverFakeKindDrive) Kind() string { return d.kind }
+func (d *serverFakeKindDrive) ID() string   { return d.id }
+
+type serverFakeSpider91MigrationRunner struct {
+	called int
+}
+
+func (r *serverFakeSpider91MigrationRunner) RunOnce(context.Context) error {
+	r.called++
+	return nil
+}
+
+type serverBlockingListDrive struct {
+	id      string
+	started chan string
+	release chan struct{}
+}
+
+func (d *serverBlockingListDrive) Kind() string { return "fake" }
+func (d *serverBlockingListDrive) ID() string   { return d.id }
+func (d *serverBlockingListDrive) Init(context.Context) error {
+	return nil
+}
+func (d *serverBlockingListDrive) List(ctx context.Context, _ string) ([]drives.Entry, error) {
+	if d.started != nil {
+		select {
+		case d.started <- d.id:
+		default:
+		}
+	}
+	select {
+	case <-d.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (d *serverBlockingListDrive) Stat(context.Context, string) (*drives.Entry, error) {
+	return nil, drives.ErrNotSupported
+}
+func (d *serverBlockingListDrive) StreamURL(context.Context, string) (*drives.StreamLink, error) {
+	return &drives.StreamLink{URL: "https://video.example/clip.mp4"}, nil
+}
+func (d *serverBlockingListDrive) Upload(context.Context, string, string, io.Reader, int64) (string, error) {
+	return "", drives.ErrNotSupported
+}
+func (d *serverBlockingListDrive) EnsureDir(context.Context, string) (string, error) {
+	return "", drives.ErrNotSupported
+}
+func (d *serverBlockingListDrive) RootID() string { return "root" }
 
 type serverFingerprintFakeDrive struct {
 	serverFakeDrive

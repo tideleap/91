@@ -91,6 +91,39 @@ func TestRunIgnoresZeroSizeVideoFiles(t *testing.T) {
 	}
 }
 
+func TestRunScannedCountsOnlyVideoCandidates(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+
+	drv := &scannerFakeDrive{
+		entries: []drives.Entry{
+			{ID: "file-1", Name: "clip.mp4", Size: 123},
+			{ID: "file-2", Name: "notes.txt", Size: 123},
+			{ID: "file-3", Name: "empty.mp4", Size: 0},
+		},
+	}
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
+
+	stats, err := sc.Run(ctx, "")
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if stats.Scanned != 1 {
+		t.Fatalf("scanned = %d, want one non-empty video candidate", stats.Scanned)
+	}
+	if stats.Added != 1 {
+		t.Fatalf("added = %d, want one added video", stats.Added)
+	}
+}
+
 func TestRunStopsWhenContextCanceledDuringFileLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cat, err := catalog.Open(t.TempDir() + "/catalog.db")

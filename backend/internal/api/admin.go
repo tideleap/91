@@ -45,7 +45,7 @@ type AdminServer struct {
 	OnDriveSaved               func(driveID string) error
 	OnDriveDeleteCleanup       func(ctx context.Context, driveID string) (int, error)
 	OnDriveRemoved             func(driveID string)
-	OnScanRequested            func(driveID string)
+	OnScanRequested            func(driveID string) bool
 	OnStopDriveTasks           func(driveID string) bool
 	OnStopAllTasks             func() int
 	OnRegenPreview             func(videoID string)
@@ -81,6 +81,11 @@ type AdminServer struct {
 	P123HTTPClient     *http.Client
 }
 
+const (
+	driveTaskBusyMessage = "当前存储有正在进行的任务，请稍后重试"
+	fullScanBusyMessage  = "当前有全量扫描任务正在进行，请稍后重试"
+)
+
 // DriveDirEntry 是 dirtree 接口的一条返回项：网盘上的一个目录节点。
 type DriveDirEntry struct {
 	ID   string `json:"id"`
@@ -92,9 +97,12 @@ type GenerationStatus struct {
 	CurrentTitle  string `json:"currentTitle,omitempty"`
 	QueueLength   int    `json:"queueLength"`
 	CooldownUntil string `json:"cooldownUntil,omitempty"`
+	ScannedCount  int    `json:"scannedCount"`
+	AddedCount    int    `json:"addedCount"`
 }
 
 type DriveGenerationStatuses struct {
+	Scan        GenerationStatus `json:"scan"`
 	Thumbnail   GenerationStatus `json:"thumbnail"`
 	Preview     GenerationStatus `json:"preview"`
 	Fingerprint GenerationStatus `json:"fingerprint"`
@@ -417,6 +425,7 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 		// 其它 kind 留 0；前端用它显示"上次抓取: N 小时前"。
 		Spider91Proxy                 string           `json:"spider91Proxy,omitempty"`
 		LastCrawlAt                   int64            `json:"lastCrawlAt,omitempty"`
+		ScanGenerationStatus          GenerationStatus `json:"scanGenerationStatus"`
 		ThumbnailGenerationStatus     GenerationStatus `json:"thumbnailGenerationStatus"`
 		PreviewGenerationStatus       GenerationStatus `json:"previewGenerationStatus"`
 		FingerprintGenerationStatus   GenerationStatus `json:"fingerprintGenerationStatus"`
@@ -437,6 +446,9 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 		thumbCounts := thumbnailCounts[d.ID]
 		fingerprintCount := fingerprintCounts[d.ID]
 		generation := generationStatuses[d.ID]
+		if generation.Scan.State == "" {
+			generation.Scan.State = "idle"
+		}
 		if generation.Thumbnail.State == "" {
 			generation.Thumbnail.State = "idle"
 		}
@@ -476,6 +488,7 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 			SkipDirIDs:                    append([]string{}, d.SkipDirIDs...),
 			Spider91Proxy:                 spider91ProxyForDrive(d),
 			LastCrawlAt:                   lastCrawlAt,
+			ScanGenerationStatus:          generation.Scan,
 			ThumbnailGenerationStatus:     generation.Thumbnail,
 			PreviewGenerationStatus:       generation.Preview,
 			FingerprintGenerationStatus:   generation.Fingerprint,
@@ -675,10 +688,26 @@ type deleteDriveReq struct {
 
 func (a *AdminServer) handleRescan(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if a.OnScanRequested != nil {
-		a.OnScanRequested(id)
+	status := a.nightlyJobStatus()
+	if status.Running || status.Queued {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"ok":       true,
+			"accepted": false,
+			"message":  fullScanBusyMessage,
+			"status":   status,
+		})
+		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+
+	accepted := true
+	if a.OnScanRequested != nil {
+		accepted = a.OnScanRequested(id)
+	}
+	resp := map[string]any{"ok": true, "accepted": accepted}
+	if !accepted {
+		resp["message"] = driveTaskBusyMessage
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (a *AdminServer) handleStopDriveTasks(w http.ResponseWriter, r *http.Request) {
@@ -734,11 +763,15 @@ func (a *AdminServer) handleRunNightlyJob(w http.ResponseWriter, r *http.Request
 	if a.OnRunNightlyJob != nil {
 		accepted = a.OnRunNightlyJob()
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"ok":       true,
 		"accepted": accepted,
 		"status":   a.nightlyJobStatus(),
-	})
+	}
+	if !accepted {
+		resp["message"] = fullScanBusyMessage
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (a *AdminServer) handleNightlyJobStatus(w http.ResponseWriter, r *http.Request) {

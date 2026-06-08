@@ -278,6 +278,108 @@ func TestHandleRunNightlyJobReturnsAcceptedStatus(t *testing.T) {
 	}
 }
 
+func TestHandleRunNightlyJobReturnsBusyMessageWhenRejected(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/jobs/nightly/run", nil)
+	rr := httptest.NewRecorder()
+
+	(&AdminServer{
+		OnRunNightlyJob: func() bool {
+			return false
+		},
+		GetNightlyJobStatus: func() NightlyJobStatus {
+			return NightlyJobStatus{State: "running", Running: true}
+		},
+	}).handleRunNightlyJob(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		OK       bool             `json:"ok"`
+		Accepted bool             `json:"accepted"`
+		Message  string           `json:"message"`
+		Status   NightlyJobStatus `json:"status"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK || got.Accepted || got.Message != fullScanBusyMessage || !got.Status.Running {
+		t.Fatalf("response = %#v, want rejected busy message", got)
+	}
+}
+
+func TestHandleRescanRejectsWhenNightlyBusy(t *testing.T) {
+	called := false
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/drives/PikPak/rescan", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "PikPak")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	(&AdminServer{
+		OnScanRequested: func(driveID string) bool {
+			called = true
+			return true
+		},
+		GetNightlyJobStatus: func() NightlyJobStatus {
+			return NightlyJobStatus{State: "running", Running: true}
+		},
+	}).handleRescan(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body = %s", rr.Code, rr.Body.String())
+	}
+	if called {
+		t.Fatal("OnScanRequested was called while nightly job was busy")
+	}
+	var got struct {
+		OK       bool             `json:"ok"`
+		Accepted bool             `json:"accepted"`
+		Message  string           `json:"message"`
+		Status   NightlyJobStatus `json:"status"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK || got.Accepted || got.Message != fullScanBusyMessage || !got.Status.Running {
+		t.Fatalf("response = %#v, want rejected full scan busy message", got)
+	}
+}
+
+func TestHandleRescanReturnsAcceptedFlagAndBusyMessage(t *testing.T) {
+	calledWith := ""
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/drives/PikPak/rescan", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "PikPak")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	(&AdminServer{
+		OnScanRequested: func(driveID string) bool {
+			calledWith = driveID
+			return false
+		},
+	}).handleRescan(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		OK       bool   `json:"ok"`
+		Accepted bool   `json:"accepted"`
+		Message  string `json:"message"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if calledWith != "PikPak" {
+		t.Fatalf("hook called with %q, want PikPak", calledWith)
+	}
+	if !got.OK || got.Accepted || got.Message != driveTaskBusyMessage {
+		t.Fatalf("response = %#v, want rejected busy message", got)
+	}
+}
+
 func TestHandleNightlyJobStatusDefaultsToIdle(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/jobs/nightly/status", nil)
 	rr := httptest.NewRecorder()
@@ -854,6 +956,7 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 		GetDriveGenerationStatuses: func() map[string]DriveGenerationStatuses {
 			return map[string]DriveGenerationStatuses{
 				"OneDrive": {
+					Scan:        GenerationStatus{State: "scanning", ScannedCount: 12, AddedCount: 3},
 					Thumbnail:   GenerationStatus{State: "cooling", QueueLength: 3, CooldownUntil: "2026-05-16T21:00:00+08:00"},
 					Preview:     GenerationStatus{State: "generating", CurrentTitle: "OD Pending"},
 					Fingerprint: GenerationStatus{State: "generating", CurrentTitle: "OD Pending"},
@@ -867,6 +970,7 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 	}
 	var got []struct {
 		ID                            string           `json:"id"`
+		ScanGenerationStatus          GenerationStatus `json:"scanGenerationStatus"`
 		ThumbnailGenerationStatus     GenerationStatus `json:"thumbnailGenerationStatus"`
 		PreviewGenerationStatus       GenerationStatus `json:"previewGenerationStatus"`
 		FingerprintGenerationStatus   GenerationStatus `json:"fingerprintGenerationStatus"`
@@ -895,6 +999,7 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 		FingerprintReady         int
 		FingerprintPending       int
 		FingerprintFailed        int
+		Scan                     GenerationStatus
 		Thumbnail                GenerationStatus
 		Preview                  GenerationStatus
 		Fingerprint              GenerationStatus
@@ -911,6 +1016,7 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 			FingerprintReady         int
 			FingerprintPending       int
 			FingerprintFailed        int
+			Scan                     GenerationStatus
 			Thumbnail                GenerationStatus
 			Preview                  GenerationStatus
 			Fingerprint              GenerationStatus
@@ -925,6 +1031,7 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 			FingerprintReady:         d.FingerprintReadyCount,
 			FingerprintPending:       d.FingerprintPendingCount,
 			FingerprintFailed:        d.FingerprintFailedCount,
+			Scan:                     d.ScanGenerationStatus,
 			Thumbnail:                d.ThumbnailGenerationStatus,
 			Preview:                  d.PreviewGenerationStatus,
 			Fingerprint:              d.FingerprintGenerationStatus,
@@ -942,6 +1049,12 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 	if byID["OneDrive"].Thumbnail.State != "cooling" || byID["OneDrive"].Preview.State != "generating" {
 		t.Fatalf("OneDrive generation statuses = %#v, want thumbnail cooling and preview generating", byID["OneDrive"])
 	}
+	if byID["OneDrive"].Scan.State != "scanning" {
+		t.Fatalf("OneDrive scan status = %#v, want scanning", byID["OneDrive"].Scan)
+	}
+	if byID["OneDrive"].Scan.ScannedCount != 12 || byID["OneDrive"].Scan.AddedCount != 3 {
+		t.Fatalf("OneDrive scan counts = %#v, want scanned=12 added=3", byID["OneDrive"].Scan)
+	}
 	if byID["OneDrive"].FingerprintReady != 1 || byID["OneDrive"].FingerprintPending != 1 || byID["OneDrive"].FingerprintFailed != 1 {
 		t.Fatalf("OneDrive fingerprint counts = %#v, want ready=1 pending=1 failed=1", byID["OneDrive"])
 	}
@@ -957,7 +1070,7 @@ func TestHandleListDrivesIncludesTeaserCounts(t *testing.T) {
 	if byID["PikPak"].FingerprintPending != 2 {
 		t.Fatalf("PikPak fingerprint counts = %#v, want pending=2", byID["PikPak"])
 	}
-	if byID["PikPak"].Thumbnail.State != "idle" || byID["PikPak"].Preview.State != "idle" || byID["PikPak"].Fingerprint.State != "idle" {
+	if byID["PikPak"].Scan.State != "idle" || byID["PikPak"].Thumbnail.State != "idle" || byID["PikPak"].Preview.State != "idle" || byID["PikPak"].Fingerprint.State != "idle" {
 		t.Fatalf("PikPak generation statuses = %#v, want idle defaults", byID["PikPak"])
 	}
 }

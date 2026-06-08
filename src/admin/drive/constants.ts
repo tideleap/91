@@ -56,12 +56,12 @@ export function nightlyButtonText(status: { running: boolean; queued: boolean },
 }
 
 export function nightlyBusyText(status: { running: boolean; queued: boolean }) {
-  if (status.running) return "扫描任务正在运行";
-  if (status.queued) return "扫描任务已排队";
+  if (status.running || status.queued) return "当前有全量扫描任务正在进行，请稍后重试";
   return "";
 }
 
 export function generationStateLabel(state: string): string {
+  if (state === "scanning") return "扫盘中";
   if (state === "generating") return "生成中";
   if (state === "cooling") return "冷却中";
   if (state === "queued") return "排队中";
@@ -69,7 +69,8 @@ export function generationStateLabel(state: string): string {
 }
 
 export function generationStateClass(state: string): string {
-  if (state === "generating" || state === "cooling" || state === "queued") {
+  if (state === "scanning" || state === "generating" || state === "cooling" || state === "queued") {
+    if (state === "scanning") return "generating";
     return state;
   }
   return "idle";

@@ -38,6 +38,21 @@ import { DriveForm } from "./drive/DriveForm";
 import { DeleteDriveModal } from "./drive/DeleteDriveModal";
 import { SkipDirsPanel } from "./drive/SkipDirsPanel";
 
+const DRIVE_BUSY_MESSAGE = "当前存储有正在进行的任务，请稍后重试";
+const NIGHTLY_BUSY_MESSAGE = "当前有全量扫描任务正在进行，请稍后重试";
+
+function isDriveBusy(d: api.AdminDrive) {
+  return [
+    d.scanGenerationStatus,
+    d.thumbnailGenerationStatus,
+    d.previewGenerationStatus,
+    d.fingerprintGenerationStatus,
+  ].some((status) => {
+    const state = status?.state || "idle";
+    return state !== "idle";
+  });
+}
+
 export function DrivesPage() {
   const [list, setList] = useState<api.AdminDrive[]>([]);
   const [storage, setStorage] = useState<api.AdminDriveStorage | null>(null);
@@ -61,7 +76,8 @@ export function DrivesPage() {
   const [scanningAll, setScanningAll] = useState(false);
   const [stoppingAll, setStoppingAll] = useState(false);
   const [trackingNightly, setTrackingNightly] = useState(false);
-  const [scanningDriveId, setScanningDriveId] = useState("");
+  const [scanningDriveIds, setScanningDriveIds] = useState<Record<string, boolean>>({});
+  const scanningDriveIdsRef = useRef(new Set<string>());
   const [stoppingDriveId, setStoppingDriveId] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedDriveId = searchParams.get("drive") || null;
@@ -295,25 +311,47 @@ export function DrivesPage() {
   }
 
   async function handleRescan(d: api.AdminDrive) {
-    if (scanningDriveId) return;
-    setScanningDriveId(d.id);
+    if (nightlyBusy) {
+      show(nightlyBusyText(nightlyStatus) || NIGHTLY_BUSY_MESSAGE, "info");
+      return;
+    }
+    if (isDriveBusy(d) || scanningDriveIdsRef.current.has(d.id)) {
+      show(DRIVE_BUSY_MESSAGE, "info");
+      return;
+    }
+    scanningDriveIdsRef.current.add(d.id);
+    setScanningDriveIds((prev) => ({ ...prev, [d.id]: true }));
     try {
-      await api.rescan(d.id);
+      const resp = await api.rescan(d.id);
+      if (!resp.accepted) {
+        if (resp.status) {
+          setNightlyStatus(resp.status);
+        }
+        show(resp.message || DRIVE_BUSY_MESSAGE, "info");
+        refreshDriveList();
+        return;
+      }
       if (d.kind === "spider91") {
         show("已触发抓取任务，需要 2-4 分钟，可稍后刷新视频列表查看", "success");
       } else {
         show("已触发扫描，可稍后刷新视频列表查看", "success");
       }
+      refreshDriveList();
     } catch (e) {
       show(e instanceof Error ? e.message : "触发失败", "error");
     } finally {
-      setScanningDriveId("");
+      scanningDriveIdsRef.current.delete(d.id);
+      setScanningDriveIds((prev) => {
+        const next = { ...prev };
+        delete next[d.id];
+        return next;
+      });
     }
   }
 
   async function handleRunNightly() {
     if (nightlyBusy) {
-      show(nightlyBusyText(nightlyStatus) || "当前已有扫描所有网盘任务", "info");
+      show(nightlyBusyText(nightlyStatus) || NIGHTLY_BUSY_MESSAGE, "info");
       return;
     }
     setScanningAll(true);
@@ -324,7 +362,7 @@ export function DrivesPage() {
         setTrackingNightly(!resp.status.running);
         show("已触发扫描所有网盘，耗时较长，可在任务状态和 backend 日志观察进度", "success");
       } else {
-        show("当前已有扫描所有网盘任务", "info");
+        show(resp.message || NIGHTLY_BUSY_MESSAGE, "info");
       }
     } catch (e) {
       show(e instanceof Error ? e.message : "触发失败", "error");
@@ -515,17 +553,24 @@ export function DrivesPage() {
                     type="button"
                     className="admin-btn is-primary"
                     onClick={() => handleRescan(d)}
-                    disabled={!!scanningDriveId}
+                    aria-disabled={nightlyBusy || isDriveBusy(d) || !!scanningDriveIds[d.id]}
+                    title={
+                      nightlyBusy
+                        ? nightlyBusyText(nightlyStatus) || NIGHTLY_BUSY_MESSAGE
+                        : isDriveBusy(d) || scanningDriveIds[d.id]
+                        ? DRIVE_BUSY_MESSAGE
+                        : undefined
+                    }
                   >
                     {d.kind === "spider91" ? (
                       <>
-                        <Download size={13} className={scanningDriveId === d.id ? "admin-spin" : undefined} />
-                        {scanningDriveId === d.id ? "触发中..." : "立即抓取"}
+                        <Download size={13} className={scanningDriveIds[d.id] ? "admin-spin" : undefined} />
+                        {scanningDriveIds[d.id] ? "触发中..." : "立即抓取"}
                       </>
                     ) : (
                       <>
-                        <RefreshCw size={13} className={scanningDriveId === d.id ? "admin-spin" : undefined} />
-                        {scanningDriveId === d.id ? "触发中..." : "立即重扫"}
+                        <RefreshCw size={13} className={scanningDriveIds[d.id] ? "admin-spin" : undefined} />
+                        {scanningDriveIds[d.id] ? "触发中..." : "立即重扫"}
                       </>
                     )}
                   </button>

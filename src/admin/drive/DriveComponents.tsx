@@ -205,6 +205,11 @@ export function DriveGenerationPanel({
 
       <div className="admin-gen-columns">
         <DriveGenCol
+          label={d.kind === "spider91" ? "抓取" : "扫盘"}
+          status={d.scanGenerationStatus}
+          showCounts={false}
+        />
+        <DriveGenCol
           label="封面"
           status={d.thumbnailGenerationStatus}
           ready={d.thumbnailReadyCount}
@@ -265,6 +270,7 @@ function DriveGenCol({
   pending,
   failed,
   extra,
+  showCounts = true,
 }: {
   label: string;
   status?: api.DriveGenerationStatus;
@@ -272,10 +278,14 @@ function DriveGenCol({
   pending?: number;
   failed?: number;
   extra?: number;
+  showCounts?: boolean;
 }) {
   const state = status?.state || "idle";
   const detail = generationDetail(status);
   const title = generationTitle(status, detail);
+  const stateLabel = label === "抓取" && state === "scanning" ? "抓取中" : generationStateLabel(state);
+  const showScanProgress = !showCounts && (state === "scanning" || (status?.scannedCount ?? 0) > 0 || (status?.addedCount ?? 0) > 0);
+  const scannedLabel = label === "抓取" ? "已抓取" : "已扫描";
   return (
     <div className="admin-gen-col">
       <div className="admin-gen-col__head">
@@ -284,18 +294,26 @@ function DriveGenCol({
           className={`admin-status admin-generation-state is-${generationStateClass(state)}`}
           title={title || undefined}
         >
-          {generationStateLabel(state)}
+          {stateLabel}
         </span>
       </div>
       {detail && <div className="admin-gen-col__detail">{detail}</div>}
-      <div className="admin-gen-col__counts">
-        <div className="admin-gen-col__count"><span>就绪</span><strong>{ready ?? 0}</strong></div>
-        <div className="admin-gen-col__count"><span>待生成</span><strong>{pending ?? 0}</strong></div>
-        <div className="admin-gen-col__count"><span>失败</span><strong>{failed ?? 0}</strong></div>
-        {(extra ?? 0) > 0 && (
-          <div className="admin-gen-col__count"><span>待补时长</span><strong>{extra}</strong></div>
-        )}
-      </div>
+      {showScanProgress && (
+        <div className="admin-gen-col__counts admin-gen-col__counts--scan">
+          <div className="admin-gen-col__count"><span>{scannedLabel}</span><strong>{status?.scannedCount ?? 0}</strong></div>
+          <div className="admin-gen-col__count"><span>预计新增</span><strong>{status?.addedCount ?? 0}</strong></div>
+        </div>
+      )}
+      {showCounts && (
+        <div className="admin-gen-col__counts">
+          <div className="admin-gen-col__count"><span>就绪</span><strong>{ready ?? 0}</strong></div>
+          <div className="admin-gen-col__count"><span>待生成</span><strong>{pending ?? 0}</strong></div>
+          <div className="admin-gen-col__count"><span>失败</span><strong>{failed ?? 0}</strong></div>
+          {(extra ?? 0) > 0 && (
+            <div className="admin-gen-col__count"><span>待补时长</span><strong>{extra}</strong></div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

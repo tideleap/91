@@ -186,6 +186,37 @@ test("drive management exposes stop task controls", () => {
   assert.match(drivesPageSource, /停止所有网盘任务/);
 });
 
+test("drive rescan reports busy storage tasks instead of queueing duplicates", () => {
+  assert.match(apiSource, /accepted:\s*boolean;\s*message\?:\s*string/);
+  assert.match(apiSource, /scanGenerationStatus\?: DriveGenerationStatus/);
+  assert.match(drivesPageSource, /当前存储有正在进行的任务，请稍后重试/);
+  assert.match(drivesPageSource, /function isDriveBusy\(d: api\.AdminDrive\)/);
+  assert.match(drivesPageSource, /d\.scanGenerationStatus/);
+  assert.match(drivesPageSource, /status\?\.state \|\| "idle"/);
+  assert.match(drivesPageSource, /scanningDriveIdsRef\.current\.has\(d\.id\)/);
+  assert.match(drivesPageSource, /if \(!resp\.accepted\)/);
+  assert.doesNotMatch(drivesPageSource, /disabled=\{!!scanningDriveId\}/);
+});
+
+test("nightly scan duplicate trigger uses full-scan busy message", () => {
+  assert.match(apiSource, /status:\s*NightlyJobStatus;\s*message\?:\s*string/);
+  assert.match(drivesPageSource, /当前有全量扫描任务正在进行，请稍后重试/);
+  assert.match(drivesPageSource, /resp\.message \|\| NIGHTLY_BUSY_MESSAGE/);
+  assert.match(constantsSource, /当前有全量扫描任务正在进行，请稍后重试/);
+});
+
+test("drive generation panel shows scan or crawler status first", () => {
+  assert.match(driveComponentsSource, /label=\{d\.kind === "spider91" \? "抓取" : "扫盘"\}/);
+  assert.match(driveComponentsSource, /status=\{d\.scanGenerationStatus\}/);
+  assert.match(driveComponentsSource, /showCounts=\{false\}/);
+  assert.match(driveComponentsSource, /label === "抓取" && state === "scanning" \? "抓取中"/);
+  assert.match(driveComponentsSource, /status\?\.scannedCount/);
+  assert.match(driveComponentsSource, /预计新增/);
+  assert.match(apiSource, /scannedCount:\s*number/);
+  assert.match(apiSource, /addedCount:\s*number/);
+  assert.match(constantsSource, /if \(state === "scanning"\) return "扫盘中"/);
+});
+
 test("drive detail selection is stored in the URL history", () => {
   assert.match(drivesPageSource, /useSearchParams/);
   assert.match(drivesPageSource, /searchParams\.get\("drive"\)/);

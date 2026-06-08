@@ -95,6 +95,7 @@ export type AdminDrive = {
   lastCrawlAt?: number;
   // spider91 专用代理地址；仅后台管理接口返回，用于编辑表单回显。
   spider91Proxy?: string;
+  scanGenerationStatus?: DriveGenerationStatus;
   thumbnailGenerationStatus?: DriveGenerationStatus;
   previewGenerationStatus?: DriveGenerationStatus;
   fingerprintGenerationStatus?: DriveGenerationStatus;
@@ -115,6 +116,8 @@ export type DriveGenerationStatus = {
   currentTitle?: string;
   queueLength: number;
   cooldownUntil?: string;
+  scannedCount: number;
+  addedCount: number;
 };
 
 export function listDrives() {
@@ -170,7 +173,7 @@ export function deleteDrive(id: string, body: DeleteDriveInput) {
 }
 
 export function rescan(id: string) {
-  return request<{ ok: boolean }>(
+  return request<{ ok: boolean; accepted: boolean; message?: string; status?: NightlyJobStatus }>(
     `/drives/${encodeURIComponent(id)}/rescan`,
     { method: "POST" }
   );
@@ -448,7 +451,7 @@ export function getNightlyJobStatus() {
 }
 
 export function runNightlyJob() {
-  return request<{ ok: boolean; accepted: boolean; status: NightlyJobStatus }>(
+  return request<{ ok: boolean; accepted: boolean; status: NightlyJobStatus; message?: string }>(
     "/jobs/nightly/run",
     { method: "POST" }
   );

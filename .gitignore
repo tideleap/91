@@ -35,3 +35,9 @@ tmp/
 91VideoSpider/__pycache__/
 __pycache__/
 *.pyc
+
+# Local scratch images
+/image.jpg
+/image003.jpg
+/image004.jpg
+/image02.png
