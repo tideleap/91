@@ -609,7 +609,8 @@ func TestNightlyTargetsComeFromCatalogBeforeDriveAttach(t *testing.T) {
 		{ID: "115", Kind: "p115", Name: "115", RootID: "0", TeaserEnabled: true},
 		{ID: "pikpak", Kind: "pikpak", Name: "PikPak", RootID: "0", TeaserEnabled: true},
 		{ID: "91-legacy", Kind: "spider91", Name: "91 Legacy", RootID: "0", TeaserEnabled: true},
-		{ID: "91-crawler", Kind: scriptcrawler.Kind, Name: "91 Spider", RootID: "/", TeaserEnabled: true},
+		{ID: "91-crawler", Kind: scriptcrawler.Kind, Name: "91 Spider", RootID: "/", Credentials: map[string]string{"script_path": "/tmp/crawler.py"}, TeaserEnabled: true},
+		{ID: "91-crawler-deleted", Kind: scriptcrawler.Kind, Name: "Deleted Spider", RootID: "/", Credentials: map[string]string{}, TeaserEnabled: true},
 	} {
 		if err := cat.UpsertDrive(ctx, d); err != nil {
 			t.Fatalf("seed drive %s: %v", d.ID, err)

@@ -154,6 +154,7 @@ OUTPUT_FILE = "91porn_videos.json"
 MAX_PAGES = None          # 设置为 None 爬取所有页，或设置整数如 5 只爬前5页
 RESUME = True             # 是否跳过输出文件中已存在的 viewkey (断点续爬)
 MAX_EMPTY_PAGES = 2       # 连续空页数达到此值时停止爬取
+CRAWLER_NAME = "91Porn"
 CRAWLER_PROTOCOL = "crawler.v1"
 # ===================================================
 

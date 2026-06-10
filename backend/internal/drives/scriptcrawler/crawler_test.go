@@ -135,6 +135,58 @@ func TestCrawlerRunOnceUsesSourceKindNamespace(t *testing.T) {
 	}
 }
 
+func TestCrawlerRunOncePassesAbsoluteJobPathsWhenWorkDirDiffers(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	cat, err := catalog.Open(filepath.Join(tmp, "catalog.db"))
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+	drv := New(Config{ID: "demo", RootDir: filepath.Join("data", "crawler")})
+	if err := drv.Init(ctx); err != nil {
+		t.Fatalf("driver init: %v", err)
+	}
+	scriptDir := filepath.Join(tmp, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir script dir: %v", err)
+	}
+	dummyScript := filepath.Join(scriptDir, "helper-script")
+	if err := os.WriteFile(dummyScript, []byte("helper"), 0o755); err != nil {
+		t.Fatalf("write dummy script: %v", err)
+	}
+	wrapper := filepath.Join(tmp, "helper-wrapper.sh")
+	wrapperScript := fmt.Sprintf("#!/bin/sh\nexec %q -test.run=TestScriptCrawlerHelperProcess \"$@\"\n", os.Args[0])
+	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o755); err != nil {
+		t.Fatalf("write helper wrapper: %v", err)
+	}
+
+	t.Setenv("GO_WANT_SCRIPTCRAWLER_HELPER", "1")
+	t.Setenv("GO_WANT_SCRIPTCRAWLER_ASSERT_ABS", "1")
+	c := NewCrawler(CrawlerConfig{
+		Driver:     drv,
+		Catalog:    cat,
+		PythonPath: wrapper,
+		ScriptPath: dummyScript,
+		WorkDir:    scriptDir,
+	})
+	res, err := c.RunOnce(ctx, 1)
+	if err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if res.NewVideos != 1 || res.Skipped != 0 || res.Failed != 0 {
+		t.Fatalf("result = new:%d skipped:%d failed:%d, want 1/0/0", res.NewVideos, res.Skipped, res.Failed)
+	}
+	if !filepath.IsAbs(res.JobFile) || !filepath.IsAbs(res.SeenFile) {
+		t.Fatalf("result paths should be absolute: job=%q seen=%q", res.JobFile, res.SeenFile)
+	}
+}
+
 func TestCrawlerRunOnceImportsSimpleMediaURLWithoutSourceID(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
@@ -240,6 +292,12 @@ func TestScriptCrawlerHelperProcess(t *testing.T) {
 	if err := json.Unmarshal(data, &job); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if os.Getenv("GO_WANT_SCRIPTCRAWLER_ASSERT_ABS") == "1" {
+		if !filepath.IsAbs(jobPath) || !filepath.IsAbs(job.SeenSourceIDsFile) || !filepath.IsAbs(job.OutputDir) {
+			fmt.Fprintf(os.Stderr, "expected absolute paths, got job=%q seen=%q output=%q\n", jobPath, job.SeenSourceIDsFile, job.OutputDir)
+			os.Exit(2)
+		}
 	}
 	if os.Getenv("GO_WANT_SCRIPTCRAWLER_SIMPLE") == "1" {
 		event := map[string]any{

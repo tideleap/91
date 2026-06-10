@@ -239,9 +239,6 @@ func main() {
 		SetSpider91UploadDriveID: func(id string) error {
 			return app.SetSpider91UploadDriveID(ctx, id)
 		},
-		DefaultSpider91ScriptPath: func() string {
-			return app.defaultSpider91ScriptPath()
-		},
 		OnRunNightlyJob: func() bool {
 			if app.nightlyRunner != nil {
 				return app.nightlyRunner.TriggerNow()
@@ -881,30 +878,6 @@ func (a *App) commonThumbsDir() string {
 	return filepath.Join(a.cfg.Storage.LocalPreviewDir, "thumbs")
 }
 
-// defaultSpider91ScriptPath 推断仓库里爬虫脚本的默认路径。
-// 当前进程从 backend/ 启动时，脚本位于 ../91VideoSpider/spider_91porn.py。
-// 找不到时返回空字符串，上层会在 RunOnce 时报错提示用户手动填 script_path。
-func (a *App) defaultSpider91ScriptPath() string {
-	candidates := []string{
-		// 优先从配置目录的父目录定位
-		filepath.Join(filepath.Dir(filepath.Dir(a.cfg.Storage.LocalPreviewDir)), "91VideoSpider", "spider_91porn.py"),
-		// 仓库 root（cwd 在 backend/ 时）
-		filepath.Join("..", "91VideoSpider", "spider_91porn.py"),
-		// cwd 已经是仓库 root 时
-		filepath.Join("91VideoSpider", "spider_91porn.py"),
-	}
-	for _, p := range candidates {
-		abs, err := filepath.Abs(p)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(abs); err == nil {
-			return abs
-		}
-	}
-	return ""
-}
-
 // attachScriptCrawler 创建通用脚本爬虫 runner，并注册到 a.scriptCrawlers。
 func (a *App) attachScriptCrawler(d *catalog.Drive, drv *scriptcrawler.Driver) {
 	pythonPath := strings.TrimSpace(d.Credentials["python_path"])
@@ -913,9 +886,6 @@ func (a *App) attachScriptCrawler(d *catalog.Drive, drv *scriptcrawler.Driver) {
 	}
 	scriptPath := strings.TrimSpace(d.Credentials["script_path"])
 	sourceKind := scriptCrawlerSourceKindForDrive(d)
-	if scriptPath == "" && sourceKind == spider91.Kind {
-		scriptPath = a.defaultSpider91ScriptPath()
-	}
 	proxyURL := strings.TrimSpace(d.Credentials["proxy"])
 	configJSON := strings.TrimSpace(d.Credentials["config_json"])
 	workDir := ""
@@ -2442,7 +2412,7 @@ func (a *App) listSpider91DriveIDs(ctx context.Context) []string {
 	}
 	out := make([]string, 0, len(all))
 	for _, d := range all {
-		if d != nil && d.Kind == scriptcrawler.Kind {
+		if d != nil && d.Kind == scriptcrawler.Kind && strings.TrimSpace(d.Credentials["script_path"]) != "" {
 			out = append(out, d.ID)
 		}
 	}

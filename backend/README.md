@@ -84,7 +84,7 @@ go run ./cmd/server 后端 9192
 
 爬虫现在是独立后台栏目 `/admin/crawlers`，不再作为“网盘/存储类型”配置。脚本负责发现视频，后端负责去重、下载、入库、封面、预览视频和视频指纹。
 
-脚本协议见 [docs/crawler-protocol.md](../docs/crawler-protocol.md)。后台支持上传 `.py` 文件或通过 HTTP(S) 脚本链接导入，导入后的脚本会保存到数据目录旁的 `crawler-scripts/`。内置 91 爬虫也支持同一套 `crawler.v1` job 协议；后台“内置 91”会自动使用仓库里的 `91VideoSpider/spider_91porn.py`。
+脚本协议见 [docs/crawler-protocol.md](../docs/crawler-protocol.md)。后台支持上传 `.py` 文件或通过 HTTP(S) 脚本链接导入，导入后的脚本会保存到数据目录旁的 `crawler-scripts/`。脚本必须声明 `CRAWLER_NAME`，后台会自动读取它作为爬虫名称。项目不内置任何爬虫脚本，所有爬虫都由用户自行导入。
 
 ## 添加一个盘
 

@@ -273,12 +273,16 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 	}
 	emit(CrawlProgress{})
 
-	if err := os.MkdirAll(c.cfg.Driver.CrawlDir(), 0o755); err != nil {
+	crawlDir, err := filepath.Abs(c.cfg.Driver.CrawlDir())
+	if err != nil {
+		return result, fmt.Errorf("scriptcrawler: resolve crawl dir: %w", err)
+	}
+	if err := os.MkdirAll(crawlDir, 0o755); err != nil {
 		return result, err
 	}
 	runID := time.Now().UTC().Format("20060102T150405Z")
-	seenPath := filepath.Join(c.cfg.Driver.CrawlDir(), "seen-"+runID+".txt")
-	jobPath := filepath.Join(c.cfg.Driver.CrawlDir(), "job-"+runID+".json")
+	seenPath := filepath.Join(crawlDir, "seen-"+runID+".txt")
+	jobPath := filepath.Join(crawlDir, "job-"+runID+".json")
 	result.SeenFile = seenPath
 	result.JobFile = jobPath
 
@@ -412,6 +416,10 @@ func (c *Crawler) writeJobFile(path, runID string, targetNew int, seenPath strin
 		}
 		cfg = json.RawMessage(raw)
 	}
+	outputDir, err := filepath.Abs(c.cfg.Driver.OutputDir())
+	if err != nil {
+		return fmt.Errorf("resolve output dir: %w", err)
+	}
 	job := Job{
 		Protocol:          "crawler.v1",
 		Mode:              "crawl",
@@ -419,7 +427,7 @@ func (c *Crawler) writeJobFile(path, runID string, targetNew int, seenPath strin
 		CrawlerID:         c.cfg.Driver.ID(),
 		TargetNew:         targetNew,
 		SeenSourceIDsFile: seenPath,
-		OutputDir:         c.cfg.Driver.OutputDir(),
+		OutputDir:         outputDir,
 		Config:            cfg,
 		Network:           JobNetwork{ProxyURL: strings.TrimSpace(c.cfg.ProxyURL)},
 	}

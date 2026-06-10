@@ -6,6 +6,14 @@ task status and cancellation.
 
 ## Invocation
 
+Every script must declare a static crawler name near the top of the Python file.
+The admin page reads this value when importing the script; users do not type the
+crawler name manually.
+
+```python
+CRAWLER_NAME = "Example Crawler"
+```
+
 The backend runs:
 
 ```bash
@@ -35,12 +43,12 @@ python3 /path/to/crawler.py --job /path/to/job.json
 ## Importing Scripts
 
 Crawler scripts are configured from the admin crawler page. A script can be
-entered as an existing server path, uploaded as a local file, or imported from
-an HTTP(S) URL.
+uploaded as a local file or imported from an HTTP(S) URL.
 
 Imported scripts are copied into `crawler-scripts/` next to the configured local
 preview data directory. The import API currently accepts Python files only
-(`.py`) and rejects empty files or files larger than 2 MiB.
+(`.py`) and rejects empty files, files larger than 2 MiB, or scripts without
+`CRAWLER_NAME`.
 
 ## Output
 

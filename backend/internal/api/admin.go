@@ -68,9 +68,6 @@ type AdminServer struct {
 	// Spider91 → 115/123/PikPak/OneDrive 上传目标 drive ID 读写
 	GetSpider91UploadDriveID func() string
 	SetSpider91UploadDriveID func(driveID string) error
-	// DefaultSpider91ScriptPath returns the built-in Spider91 crawler script
-	// path for the independent crawler management UI.
-	DefaultSpider91ScriptPath func() string
 	// OnRunNightlyJob 触发一次完整的凌晨流水线（Phase1 扫盘 + Phase2 91 爬虫 +
 	// Phase3 迁移）。立即返回 —— 实际任务在后台跑，admin 在日志或下次状态查询里
 	// 看进度。若流水线正在跑或已排队，Runner 会拒绝重复触发。
@@ -163,6 +160,7 @@ func (a *AdminServer) Register(r chi.Router) {
 			r.Post("/crawlers", a.handleUpsertCrawler)
 			r.Post("/crawlers/import-file", a.handleImportCrawlerScriptFile)
 			r.Post("/crawlers/import-url", a.handleImportCrawlerScriptURL)
+			r.Post("/crawlers/test-script", a.handleTestCrawlerScript)
 			r.Delete("/crawlers/{id}", a.handleDeleteCrawler)
 			r.Post("/crawlers/{id}/run", a.handleRunCrawler)
 			r.Post("/crawlers/{id}/tasks/stop", a.handleStopCrawlerTasks)
@@ -441,11 +439,6 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 		// LastCrawlAt 是 spider91 上次成功爬取的 unix 秒（来自 credentials.last_crawl_at）。
 		// 其它 kind 留 0；前端用它显示"上次抓取: N 小时前"。
 		Spider91Proxy                 string           `json:"spider91Proxy,omitempty"`
-		ScriptCrawlerPythonPath       string           `json:"scriptCrawlerPythonPath,omitempty"`
-		ScriptCrawlerScriptPath       string           `json:"scriptCrawlerScriptPath,omitempty"`
-		ScriptCrawlerProxy            string           `json:"scriptCrawlerProxy,omitempty"`
-		ScriptCrawlerTargetNew        string           `json:"scriptCrawlerTargetNew,omitempty"`
-		ScriptCrawlerConfigJSON       string           `json:"scriptCrawlerConfigJson,omitempty"`
 		LastCrawlAt                   int64            `json:"lastCrawlAt,omitempty"`
 		GoogleDriveUseOnlineAPI       *bool            `json:"googleDriveUseOnlineAPI,omitempty"`
 		ScanGenerationStatus          GenerationStatus `json:"scanGenerationStatus"`
@@ -513,11 +506,6 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 			TeaserEnabled:                 d.TeaserEnabled,
 			SkipDirIDs:                    append([]string{}, d.SkipDirIDs...),
 			Spider91Proxy:                 spider91ProxyForDrive(d),
-			ScriptCrawlerPythonPath:       scriptCrawlerCred(d, "python_path"),
-			ScriptCrawlerScriptPath:       scriptCrawlerCred(d, "script_path"),
-			ScriptCrawlerProxy:            scriptCrawlerCred(d, "proxy"),
-			ScriptCrawlerTargetNew:        scriptCrawlerCred(d, "target_new"),
-			ScriptCrawlerConfigJSON:       scriptCrawlerCred(d, "config_json"),
 			LastCrawlAt:                   lastCrawlAt,
 			GoogleDriveUseOnlineAPI:       googleDriveUseOnlineAPIForDrive(d),
 			ScanGenerationStatus:          generation.Scan,
@@ -637,14 +625,11 @@ type crawlerDTO struct {
 	ID                          string           `json:"id"`
 	Name                        string           `json:"name"`
 	Kind                        string           `json:"kind"`
-	Builtin                     string           `json:"builtin,omitempty"`
 	Status                      string           `json:"status"`
 	LastError                   string           `json:"lastError,omitempty"`
 	ScriptPath                  string           `json:"scriptPath"`
-	PythonPath                  string           `json:"pythonPath,omitempty"`
 	Proxy                       string           `json:"proxy,omitempty"`
 	TargetNew                   string           `json:"targetNew,omitempty"`
-	ConfigJSON                  string           `json:"configJson,omitempty"`
 	LastCrawlAt                 int64            `json:"lastCrawlAt,omitempty"`
 	ScanGenerationStatus        GenerationStatus `json:"scanGenerationStatus"`
 	ThumbnailGenerationStatus   GenerationStatus `json:"thumbnailGenerationStatus"`
@@ -663,13 +648,9 @@ type crawlerDTO struct {
 
 type upsertCrawlerReq struct {
 	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Builtin    string `json:"builtin"`
 	ScriptPath string `json:"scriptPath"`
-	PythonPath string `json:"pythonPath"`
 	Proxy      string `json:"proxy"`
 	TargetNew  string `json:"targetNew"`
-	ConfigJSON string `json:"configJson"`
 }
 
 func (a *AdminServer) handleListCrawlers(w http.ResponseWriter, r *http.Request) {
@@ -700,7 +681,7 @@ func (a *AdminServer) handleListCrawlers(w http.ResponseWriter, r *http.Request)
 
 	out := []crawlerDTO{}
 	for _, d := range all {
-		if d == nil || !isCrawlerDriveKind(d.Kind) {
+		if d == nil || !isConfiguredCrawlerDrive(d) {
 			continue
 		}
 		out = append(out, a.crawlerDTOForDrive(d, teaserCounts[d.ID], thumbnailCounts[d.ID], fingerprintCounts[d.ID], generationStatuses[d.ID]))
@@ -729,16 +710,13 @@ func (a *AdminServer) crawlerDTOForDrive(d *catalog.Drive, teaser catalog.DriveT
 	}
 	return crawlerDTO{
 		ID:                          d.ID,
-		Name:                        d.Name,
+		Name:                        crawlerNameForDrive(d),
 		Kind:                        d.Kind,
-		Builtin:                     crawlerBuiltinForDrive(d),
 		Status:                      d.Status,
 		LastError:                   d.LastError,
 		ScriptPath:                  strings.TrimSpace(d.Credentials["script_path"]),
-		PythonPath:                  strings.TrimSpace(d.Credentials["python_path"]),
 		Proxy:                       strings.TrimSpace(d.Credentials["proxy"]),
 		TargetNew:                   strings.TrimSpace(d.Credentials["target_new"]),
-		ConfigJSON:                  strings.TrimSpace(d.Credentials["config_json"]),
 		LastCrawlAt:                 lastCrawlAt,
 		ScanGenerationStatus:        generation.Scan,
 		ThumbnailGenerationStatus:   generation.Thumbnail,
@@ -756,11 +734,16 @@ func (a *AdminServer) crawlerDTOForDrive(d *catalog.Drive, teaser catalog.DriveT
 	}
 }
 
-func crawlerBuiltinForDrive(d *catalog.Drive) string {
+func crawlerNameForDrive(d *catalog.Drive) string {
 	if d == nil {
 		return ""
 	}
-	return strings.TrimSpace(d.Credentials["builtin"])
+	if d.Credentials != nil {
+		if meta, err := scriptcrawler.ReadMetadata(strings.TrimSpace(d.Credentials["script_path"])); err == nil {
+			return meta.Name
+		}
+	}
+	return strings.TrimSpace(d.Name)
 }
 
 func (a *AdminServer) handleUpsertCrawler(w http.ResponseWriter, r *http.Request) {
@@ -770,32 +753,21 @@ func (a *AdminServer) handleUpsertCrawler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := strings.TrimSpace(body.ID)
-	name := strings.TrimSpace(body.Name)
-	if id == "" || name == "" {
-		http.Error(w, "id and name are required", http.StatusBadRequest)
-		return
-	}
-	existing, _ := a.Catalog.GetDrive(r.Context(), id)
 	creds := map[string]string{}
+	var existing *catalog.Drive
+	if id != "" {
+		existing, _ = a.Catalog.GetDrive(r.Context(), id)
+	}
 	if existing != nil {
 		for k, v := range existing.Credentials {
 			creds[k] = v
 		}
 	}
-	builtin := strings.TrimSpace(body.Builtin)
-	if builtin != "" {
-		creds["builtin"] = builtin
-	}
 	scriptPath := strings.TrimSpace(body.ScriptPath)
-	if scriptPath == "" && builtin == "spider91" && a.DefaultSpider91ScriptPath != nil {
-		scriptPath = strings.TrimSpace(a.DefaultSpider91ScriptPath())
-	}
 	incoming := map[string]string{
 		"script_path": scriptPath,
-		"python_path": strings.TrimSpace(body.PythonPath),
 		"proxy":       strings.TrimSpace(body.Proxy),
 		"target_new":  strings.TrimSpace(body.TargetNew),
-		"config_json": strings.TrimSpace(body.ConfigJSON),
 	}
 	for k, v := range incoming {
 		creds[k] = v
@@ -805,8 +777,19 @@ func (a *AdminServer) handleUpsertCrawler(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if builtin != "" {
-		merged["builtin"] = builtin
+	meta, err := scriptcrawler.ReadMetadata(merged["script_path"])
+	if err != nil {
+		http.Error(w, "脚本元信息无效："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	name := meta.Name
+	if id == "" {
+		generatedID, err := a.generateCrawlerID(r.Context(), name)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		id = generatedID
 	}
 	d := &catalog.Drive{
 		ID:            id,
@@ -826,16 +809,90 @@ func (a *AdminServer) handleUpsertCrawler(w http.ResponseWriter, r *http.Request
 	}
 	if a.OnDriveSaved != nil {
 		if err := a.OnDriveSaved(id); err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": err.Error()})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "warning": err.Error()})
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+func (a *AdminServer) generateCrawlerID(ctx context.Context, name string) (string, error) {
+	all, err := a.Catalog.ListDrives(ctx)
+	if err != nil {
+		return "", err
+	}
+	used := map[string]bool{}
+	for _, d := range all {
+		if d == nil {
+			continue
+		}
+		if isCrawlerDriveKind(d.Kind) && strings.TrimSpace(d.Credentials["script_path"]) == "" {
+			continue
+		}
+		used[d.ID] = true
+	}
+	slug := crawlerIDSlug(name)
+	base := "crawler"
+	if slug != "" {
+		base += "-" + slug
+	}
+	candidate := base
+	for suffix := 2; used[candidate]; suffix++ {
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
+	return candidate, nil
+}
+
+func crawlerIDSlug(raw string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(raw) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if b.Len() > 0 && !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 type importCrawlerScriptURLReq struct {
 	URL      string `json:"url"`
 	FileName string `json:"fileName"`
+}
+
+type testCrawlerScriptReq struct {
+	ScriptPath string `json:"scriptPath"`
+	Proxy      string `json:"proxy"`
+}
+
+// handleTestCrawlerScript 试跑一个爬虫脚本：不入库，抓到第一条视频
+// （并探测直链可达）即返回，让用户在保存前确认脚本能爬到视频。
+func (a *AdminServer) handleTestCrawlerScript(w http.ResponseWriter, r *http.Request) {
+	var body testCrawlerScriptReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	scriptPath := strings.TrimSpace(body.ScriptPath)
+	if scriptPath == "" {
+		http.Error(w, "请先导入爬虫脚本", http.StatusBadRequest)
+		return
+	}
+	proxyURL, err := normalizeCrawlerProxyURL(body.Proxy, "脚本爬虫")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result := scriptcrawler.DryRun(r.Context(), scriptcrawler.DryRunConfig{
+		ScriptPath: scriptPath,
+		ProxyURL:   proxyURL,
+	})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *AdminServer) handleImportCrawlerScriptFile(w http.ResponseWriter, r *http.Request) {
@@ -860,7 +917,13 @@ func (a *AdminServer) handleImportCrawlerScriptFile(w http.ResponseWriter, r *ht
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scriptPath": scriptPath})
+	meta, err := scriptcrawler.ReadMetadata(scriptPath)
+	if err != nil {
+		_ = os.Remove(scriptPath)
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("脚本元信息无效: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scriptPath": scriptPath, "name": meta.Name})
 }
 
 func (a *AdminServer) handleImportCrawlerScriptURL(w http.ResponseWriter, r *http.Request) {
@@ -917,7 +980,13 @@ func (a *AdminServer) handleImportCrawlerScriptURL(w http.ResponseWriter, r *htt
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scriptPath": scriptPath})
+	meta, err := scriptcrawler.ReadMetadata(scriptPath)
+	if err != nil {
+		_ = os.Remove(scriptPath)
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("脚本元信息无效: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scriptPath": scriptPath, "name": meta.Name})
 }
 
 func (a *AdminServer) saveCrawlerScript(ctx context.Context, name string, r io.Reader, maxBytes int64) (string, error) {
@@ -935,7 +1004,7 @@ func (a *AdminServer) saveCrawlerScript(ctx context.Context, name string, r io.R
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
 	}
-	dst := filepath.Join(root, time.Now().UTC().Format("20060102T150405.000000000Z")+"-"+fileName)
+	dst := filepath.Join(root, fileName)
 	dstAbs, err := filepath.Abs(dst)
 	if err != nil {
 		return "", err
@@ -1015,6 +1084,11 @@ func safeCrawlerScriptFileName(raw string) (string, error) {
 
 func (a *AdminServer) handleRunCrawler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	d, err := a.Catalog.GetDrive(r.Context(), id)
+	if err != nil || d == nil || !isCrawlerDriveKind(d.Kind) || d.Credentials == nil || strings.TrimSpace(d.Credentials["script_path"]) == "" {
+		http.Error(w, "crawler not found", http.StatusNotFound)
+		return
+	}
 	status := a.nightlyJobStatus()
 	if status.Running || status.Queued {
 		writeJSON(w, http.StatusAccepted, map[string]any{
@@ -1041,11 +1115,84 @@ func (a *AdminServer) handleStopCrawlerTasks(w http.ResponseWriter, r *http.Requ
 }
 
 func (a *AdminServer) handleDeleteCrawler(w http.ResponseWriter, r *http.Request) {
-	a.handleDeleteDrive(w, r)
+	id := chi.URLParam(r, "id")
+	d, err := a.Catalog.GetDrive(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	if !isCrawlerDriveKind(d.Kind) {
+		http.Error(w, "crawler not found", http.StatusNotFound)
+		return
+	}
+	if a.OnStopDriveTasks != nil {
+		a.OnStopDriveTasks(id)
+	}
+
+	deletedScript, scriptErr := a.removeImportedCrawlerScript(d)
+	if d.Credentials == nil {
+		d.Credentials = map[string]string{}
+	}
+	delete(d.Credentials, "script_path")
+	delete(d.Credentials, "proxy")
+	delete(d.Credentials, "target_new")
+	delete(d.Credentials, "builtin")
+	delete(d.Credentials, "python_path")
+	delete(d.Credentials, "config_json")
+	d.Status = "disconnected"
+	d.LastError = ""
+	if err := a.Catalog.UpsertDrive(r.Context(), d); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	resp := map[string]any{
+		"ok":            true,
+		"deletedVideos": 0,
+		"deletedScript": deletedScript,
+	}
+	if scriptErr != nil {
+		resp["warning"] = scriptErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func isCrawlerDriveKind(kind string) bool {
 	return kind == scriptcrawler.Kind
+}
+
+func isConfiguredCrawlerDrive(d *catalog.Drive) bool {
+	return d != nil &&
+		isCrawlerDriveKind(d.Kind) &&
+		d.Credentials != nil &&
+		strings.TrimSpace(d.Credentials["script_path"]) != ""
+}
+
+func (a *AdminServer) removeImportedCrawlerScript(d *catalog.Drive) (bool, error) {
+	if d == nil || d.Credentials == nil {
+		return false, nil
+	}
+	scriptPath := strings.TrimSpace(d.Credentials["script_path"])
+	if scriptPath == "" {
+		return false, nil
+	}
+	scriptAbs, err := filepath.Abs(scriptPath)
+	if err != nil {
+		return false, err
+	}
+	rootAbs, err := a.crawlerScriptImportDir()
+	if err != nil {
+		return false, err
+	}
+	if scriptAbs == rootAbs || !strings.HasPrefix(scriptAbs, rootAbs+string(os.PathSeparator)) {
+		return false, nil
+	}
+	if err := os.Remove(scriptAbs); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func spider91ProxyForDrive(d *catalog.Drive) string {
@@ -1053,13 +1200,6 @@ func spider91ProxyForDrive(d *catalog.Drive) string {
 		return ""
 	}
 	return strings.TrimSpace(d.Credentials["proxy"])
-}
-
-func scriptCrawlerCred(d *catalog.Drive, key string) string {
-	if d == nil || d.Kind != scriptcrawler.Kind || d.Credentials == nil {
-		return ""
-	}
-	return strings.TrimSpace(d.Credentials[key])
 }
 
 func googleDriveUseOnlineAPIForDrive(d *catalog.Drive) *bool {
@@ -1165,23 +1305,16 @@ func mergeScriptCrawlerCredentials(existing *catalog.Drive, incoming map[string]
 				return nil, fmt.Errorf("脚本爬虫 target_new 必须是正整数")
 			}
 			merged[key] = strconv.Itoa(n)
-		case "config_json":
+		case "script_path":
 			if value == "" {
-				delete(merged, key)
-				continue
-			}
-			if !json.Valid([]byte(value)) {
-				return nil, fmt.Errorf("脚本爬虫自定义配置必须是合法 JSON")
-			}
-			merged[key] = value
-		case "python_path", "script_path":
-			if value == "" {
-				if existing == nil || key == "script_path" {
+				if existing == nil {
 					delete(merged, key)
 				}
 				continue
 			}
 			merged[key] = value
+		case "builtin", "python_path", "config_json":
+			delete(merged, key)
 		default:
 			if value == "" {
 				delete(merged, key)
@@ -1190,9 +1323,12 @@ func mergeScriptCrawlerCredentials(existing *catalog.Drive, incoming map[string]
 			}
 		}
 	}
-	if strings.TrimSpace(merged["script_path"]) == "" && !strings.EqualFold(strings.TrimSpace(merged["builtin"]), "spider91") {
+	if strings.TrimSpace(merged["script_path"]) == "" {
 		return nil, fmt.Errorf("脚本爬虫必须填写 script_path")
 	}
+	delete(merged, "builtin")
+	delete(merged, "python_path")
+	delete(merged, "config_json")
 	return merged, nil
 }
 

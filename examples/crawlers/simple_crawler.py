@@ -3,6 +3,8 @@ import argparse
 import json
 import sys
 
+CRAWLER_NAME = "Demo Crawler"
+
 
 def load_seen(path):
     try:

@@ -128,7 +128,7 @@ verify_runtime_deps() {
     command -v "$cmd" >/dev/null 2>&1 || die "missing command: $cmd"
   done
 
-  python3 - <<'PY' || die "missing Python modules for 91Spider: requests, bs4, lxml, socks"
+  python3 - <<'PY' || die "missing Python modules for crawler scripts: requests, bs4, lxml, socks"
 import importlib.util
 import sys
 

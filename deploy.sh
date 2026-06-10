@@ -134,9 +134,9 @@ apt_install() {
     python3 python3-requests python3-bs4 python3-lxml python3-socks
 }
 
-verify_spider91_python_deps() {
-  command -v python3 >/dev/null 2>&1 || die "python3 is required for 91Spider"
-  python3 - <<'PY' || die "missing Python modules for 91Spider: requests, bs4, lxml, socks"
+verify_crawler_python_deps() {
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for crawler scripts"
+  python3 - <<'PY' || die "missing Python modules for crawler scripts: requests, bs4, lxml, socks"
 import importlib.util
 import sys
 
@@ -200,7 +200,7 @@ install_dependencies() {
   install_go
   command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg is required"
   command -v ffprobe >/dev/null 2>&1 || die "ffprobe is required"
-  verify_spider91_python_deps
+  verify_crawler_python_deps
 }
 
 ensure_ownership() {

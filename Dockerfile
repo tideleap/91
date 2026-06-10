@@ -48,7 +48,6 @@ WORKDIR /opt/video-site-91
 COPY --from=backend /out/server ./server
 COPY --from=frontend /app/dist ./dist
 COPY backend/config.example.yaml ./config.example.yaml
-COPY 91VideoSpider/ ./91VideoSpider/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ARG VERSION=dev

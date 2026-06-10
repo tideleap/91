@@ -63,8 +63,6 @@ build_package() {
   cp "$ROOT_DIR/backend/config.example.yaml" "$work/config.example.yaml"
   cp "$ROOT_DIR/install.sh" "$work/install.sh"
   cp -R "$ROOT_DIR/dist" "$work/dist"
-  mkdir -p "$work/91VideoSpider"
-  cp "$ROOT_DIR/91VideoSpider/spider_91porn.py" "$work/91VideoSpider/spider_91porn.py"
 
   cat >"$work/README.txt" <<EOF
 $APP_NAME $VERSION

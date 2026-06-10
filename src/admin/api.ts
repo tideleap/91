@@ -195,14 +195,11 @@ export type AdminCrawler = {
   id: string;
   name: string;
   kind: "scriptcrawler" | "spider91";
-  builtin?: string;
   status: string;
   lastError?: string;
   scriptPath: string;
-  pythonPath?: string;
   proxy?: string;
   targetNew?: string;
-  configJson?: string;
   lastCrawlAt?: number;
   scanGenerationStatus?: DriveGenerationStatus;
   thumbnailGenerationStatus?: DriveGenerationStatus;
@@ -220,18 +217,41 @@ export type AdminCrawler = {
 };
 
 export type UpsertCrawlerInput = {
-  id: string;
-  name: string;
-  builtin?: string;
+  id?: string;
   scriptPath: string;
-  pythonPath?: string;
   proxy?: string;
   targetNew?: string;
-  configJson?: string;
 };
 
 export type ImportCrawlerScriptResult = {
   scriptPath: string;
+  name: string;
+};
+
+export type CrawlerDryRunItem = {
+  title: string;
+  sourceId?: string;
+  mediaUrl?: string;
+  mediaLocalFile?: string;
+  thumbnailUrl?: string;
+  detailUrl?: string;
+};
+
+export type CrawlerDryRunMediaCheck = {
+  ok: boolean;
+  status?: number;
+  contentType?: string;
+  contentLengthBytes?: number;
+  error?: string;
+};
+
+export type CrawlerDryRunResult = {
+  ok: boolean;
+  items: CrawlerDryRunItem[];
+  mediaCheck?: CrawlerDryRunMediaCheck;
+  error?: string;
+  log?: string[];
+  durationMs: number;
 };
 
 export function listCrawlers() {
@@ -239,7 +259,7 @@ export function listCrawlers() {
 }
 
 export function upsertCrawler(body: UpsertCrawlerInput) {
-  return request<{ ok: boolean; warning?: string }>("/crawlers", {
+  return request<{ ok: boolean; id: string; warning?: string }>("/crawlers", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -261,6 +281,13 @@ export function importCrawlerScriptURL(url: string) {
   });
 }
 
+export function testCrawlerScript(body: { scriptPath: string; proxy?: string }) {
+  return request<CrawlerDryRunResult>("/crawlers/test-script", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export function runCrawler(id: string) {
   return request<{ ok: boolean; accepted: boolean; message?: string; status?: NightlyJobStatus }>(
     `/crawlers/${encodeURIComponent(id)}/run`,
@@ -276,9 +303,8 @@ export function stopCrawlerTasks(id: string) {
 }
 
 export function deleteCrawler(id: string) {
-  return request<{ ok: boolean; deletedVideos: number }>(`/crawlers/${encodeURIComponent(id)}`, {
+  return request<{ ok: boolean; deletedVideos: number; deletedScript?: boolean; warning?: string }>(`/crawlers/${encodeURIComponent(id)}`, {
     method: "DELETE",
-    body: JSON.stringify({ deleteVideos: true }),
   });
 }
 
