@@ -6,12 +6,15 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -178,6 +181,95 @@ func TestUploadInstantSuccessFallsBackToListWhenFileIDMissing(t *testing.T) {
 	}
 	if !listCalled {
 		t.Fatal("expected fallback list call when file.id is empty")
+	}
+}
+
+func TestUploadRetriesWithNewSessionWhenOSSEndpointDNSFails(t *testing.T) {
+	sessionRequests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		sessionRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"upload_type": "UPLOAD_TYPE_RESUMABLE",
+			"resumable": {
+				"kind": "drive#resumable",
+				"provider": "UPLOAD_TYPE_UNKNOWN",
+				"params": {
+					"access_key_id": "ak",
+					"access_key_secret": "sk",
+					"bucket": "bucket",
+					"endpoint": "https://vip-lixian-%02d.upload-a10b.mypikpak.com",
+					"key": "object-key-%02d",
+					"security_token": "token"
+				}
+			},
+			"file": {"id": "retry-file-%02d", "name": "retry.mp4", "kind": "drive#file"}
+		}`, sessionRequests, sessionRequests, sessionRequests)))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	d := newTestDriver(t, server)
+	uploadAttempts := 0
+	var uploaded []byte
+	d.uploadToOSSFunc = func(_ context.Context, _ *s3Params, body io.Reader) error {
+		uploadAttempts++
+		if uploadAttempts == 1 {
+			return &net.DNSError{Err: "no such host", Name: "vip-lixian-01.upload-a10b.mypikpak.com"}
+		}
+		var err error
+		uploaded, err = io.ReadAll(body)
+		return err
+	}
+
+	payload := []byte("retry payload body")
+	id, err := d.Upload(context.Background(), "parent-id", "retry.mp4", bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if id != "retry-file-02" {
+		t.Fatalf("file id = %q, want retry-file-02 from the second session", id)
+	}
+	if sessionRequests != 2 {
+		t.Fatalf("session requests = %d, want 2", sessionRequests)
+	}
+	if uploadAttempts != 2 {
+		t.Fatalf("upload attempts = %d, want 2", uploadAttempts)
+	}
+	if !bytes.Equal(uploaded, payload) {
+		t.Fatalf("uploaded body = %q, want %q", string(uploaded), string(payload))
+	}
+}
+
+func TestPikPakOSSClientUsesCNAMEForPikPakUploadEndpoint(t *testing.T) {
+	params := &s3Params{
+		AccessKeyID:     "ak",
+		AccessKeySecret: "sk",
+		Bucket:          "vip-lixian-07",
+		Endpoint:        "http://upload-a10b.mypikpak.com",
+		Key:             "upload_tmp/object-key",
+	}
+	client, err := newPikPakOSSClient(params)
+	if err != nil {
+		t.Fatalf("new oss client: %v", err)
+	}
+	bucket, err := client.Bucket(params.Bucket)
+	if err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	signed, err := bucket.SignURL(params.Key, oss.HTTPPut, 60)
+	if err != nil {
+		t.Fatalf("sign url: %v", err)
+	}
+	if strings.Contains(signed, "vip-lixian-07.upload-a10b.mypikpak.com") {
+		t.Fatalf("signed url uses invalid bucket-prefixed PikPak host: %s", signed)
+	}
+	if !strings.Contains(signed, "http://upload-a10b.mypikpak.com/upload_tmp%2Fobject-key") {
+		t.Fatalf("signed url = %s, want PikPak endpoint host with object key path", signed)
 	}
 }
 

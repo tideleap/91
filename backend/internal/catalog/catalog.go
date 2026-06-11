@@ -922,6 +922,80 @@ func (c *Catalog) FindVideoByFileSignature(ctx context.Context, fileName string,
 	return scanVideo(row)
 }
 
+// FindEquivalentVideoOnDrive returns a visible video on driveID that represents
+// the same content as source by strong hash or sampled fingerprint.
+func (c *Catalog) FindEquivalentVideoOnDrive(ctx context.Context, source *Video, driveID string) (*Video, error) {
+	driveID = strings.TrimSpace(driveID)
+	if source == nil || driveID == "" {
+		return nil, sql.ErrNoRows
+	}
+	where, args, ok := equivalentVideoLookupWhere(source)
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	args = append([]any{driveID, source.ID}, args...)
+	row := c.db.QueryRowContext(ctx,
+		`SELECT `+allVideoCols+` FROM videos
+		 WHERE drive_id = ?
+		   AND id != ?
+		   AND COALESCE(hidden, 0) = 0
+		   AND COALESCE(file_id, '') != ''
+		   AND (`+where+`)
+		 ORDER BY created_at ASC, id ASC
+		 LIMIT 1`, args...)
+	return scanVideo(row)
+}
+
+// HasReadyEquivalentPreview reports whether another visible row for the same
+// content already has a ready preview video.
+func (c *Catalog) HasReadyEquivalentPreview(ctx context.Context, source *Video) (bool, error) {
+	if source == nil {
+		return false, nil
+	}
+	where, args, ok := equivalentVideoLookupWhere(source)
+	if !ok {
+		return false, nil
+	}
+	args = append([]any{source.ID}, args...)
+	var found int
+	err := c.db.QueryRowContext(ctx,
+		`SELECT 1 FROM videos
+		 WHERE id != ?
+		   AND COALESCE(hidden, 0) = 0
+		   AND COALESCE(preview_status, 'pending') = 'ready'
+		   AND (`+where+`)
+		 LIMIT 1`, args...).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func equivalentVideoLookupWhere(source *Video) (string, []any, bool) {
+	if source == nil {
+		return "", nil, false
+	}
+	var parts []string
+	var args []any
+	if hash := normalizeContentHash(source.ContentHash); hash != "" {
+		parts = append(parts, "(COALESCE(content_hash, '') != '' AND content_hash = ?)")
+		args = append(args, hash)
+	}
+	if source.Size > 0 {
+		if sampled := normalizeContentHash(source.SampledSHA256); sampled != "" {
+			parts = append(parts, "(size_bytes = ? AND COALESCE(sampled_sha256, '') != '' AND sampled_sha256 = ?)")
+			args = append(args, source.Size, sampled)
+		}
+	}
+	if len(parts) == 0 {
+		return "", nil, false
+	}
+	return strings.Join(parts, " OR "), args, true
+}
+
 func (c *Catalog) ListVideosNeedingFingerprint(ctx context.Context, driveID string, limit int) ([]*Video, error) {
 	if limit <= 0 {
 		limit = 10000

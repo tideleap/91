@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -26,7 +29,7 @@ import (
 //      - 未命中：resumable.params 含 S3 兼容凭证（access_key / secret /
 //        bucket / endpoint / key / security_token）
 //
-//   3. 用 Aliyun OSS SDK PutObject 把字节传到 endpoint+bucket+key
+//   3. 用 Aliyun OSS SDK PutObject 把字节传到 PikPak 返回的临时 OSS endpoint
 //
 //   4. PikPak 服务端轮询 OSS，发现完成后把 resp.File.ID 标记为可用；
 //      所以 Upload 完成后直接返回 resp.File.ID 即可（一开始就有，
@@ -39,6 +42,9 @@ const (
 	// spider91 视频通常 ~100MiB，远低于该值。超过则需走 multipart，
 	// 当前未实现，遇到会显式报错。
 	maxSinglePutSize = 5*1024*1024*1024 - 1
+	// 首次上传失败后最多再重试 3 次。每次重试都会重新申请 PikPak
+	// upload session，以避开偶发不可解析/不可达的临时上传 endpoint。
+	pikpakUploadMaxAttempts = 4
 )
 
 // uploadTaskData 是 POST /drive/v1/files 的响应结构。
@@ -129,13 +135,49 @@ func (d *Driver) UploadAndReportHash(ctx context.Context, parentID, name string,
 		_ = os.Remove(tmp.Name())
 	}()
 
-	// 2) 申请上传会话。
+	result := UploadResult{Hash: gcidHex, Size: actualSize}
+	var lastErr error
+	for attempt := 1; attempt <= pikpakUploadMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return UploadResult{}, err
+		}
+
+		resp, err := d.requestUploadSession(ctx, parentID, name, actualSize, gcidHex)
+		if err != nil {
+			lastErr = fmt.Errorf("pikpak upload: request session: %w", err)
+			if !shouldRetryPikPakUploadAttempt(lastErr, attempt) {
+				return UploadResult{}, lastErr
+			}
+			d.logUploadRetry(name, attempt, lastErr)
+			if err := pikpakSleepContext(ctx, pikpakUploadRetryDelay(attempt)); err != nil {
+				return UploadResult{}, err
+			}
+			continue
+		}
+
+		out, err := d.completeUploadAttempt(ctx, tmp, parentID, name, result, resp)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if !shouldRetryPikPakUploadAttempt(lastErr, attempt) {
+			return UploadResult{}, lastErr
+		}
+		d.logUploadRetry(name, attempt, lastErr)
+		if err := pikpakSleepContext(ctx, pikpakUploadRetryDelay(attempt)); err != nil {
+			return UploadResult{}, err
+		}
+	}
+	return UploadResult{}, lastErr
+}
+
+func (d *Driver) requestUploadSession(ctx context.Context, parentID, name string, size int64, gcidHex string) (uploadTaskData, error) {
 	var resp uploadTaskData
 	if err := d.request(ctx, filesURL, http.MethodPost, func(req *resty.Request) {
 		req.SetBody(map[string]any{
 			"kind":        "drive#file",
 			"name":        name,
-			"size":        actualSize,
+			"size":        size,
 			"hash":        gcidHex,
 			"upload_type": "UPLOAD_TYPE_RESUMABLE",
 			"objProvider": map[string]any{"provider": "UPLOAD_TYPE_UNKNOWN"},
@@ -143,12 +185,13 @@ func (d *Driver) UploadAndReportHash(ctx context.Context, parentID, name string,
 			"folder_type": "NORMAL",
 		})
 	}, &resp); err != nil {
-		return UploadResult{}, fmt.Errorf("pikpak upload: request session: %w", err)
+		return uploadTaskData{}, err
 	}
+	return resp, nil
+}
 
-	result := UploadResult{Hash: gcidHex, Size: actualSize}
-
-	// 3) 命中秒传：服务端已经知道这个 hash，直接返回新文件 ID。
+func (d *Driver) completeUploadAttempt(ctx context.Context, tmp *os.File, parentID, name string, result UploadResult, resp uploadTaskData) (UploadResult, error) {
+	// 命中秒传：服务端已经知道这个 hash，直接返回新文件 ID。
 	if resp.Resumable == nil {
 		if resp.File.ID != "" {
 			result.FileID = resp.File.ID
@@ -163,7 +206,7 @@ func (d *Driver) UploadAndReportHash(ctx context.Context, parentID, name string,
 		return result, nil
 	}
 
-	// 4) 未命中秒传：把字节传到 S3 兼容存储。
+	// 未命中秒传：把字节传到 S3 兼容存储。
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return UploadResult{}, fmt.Errorf("pikpak upload: seek tmp: %w", err)
 	}
@@ -171,7 +214,7 @@ func (d *Driver) UploadAndReportHash(ctx context.Context, parentID, name string,
 		return UploadResult{}, fmt.Errorf("pikpak upload: oss put: %w", err)
 	}
 
-	// 5) 拿到 fileID。优先走响应里的预分配 ID；为空就回查目录。
+	// 拿到 fileID。优先走响应里的预分配 ID；为空就回查目录。
 	if resp.File.ID != "" {
 		result.FileID = resp.File.ID
 		return result, nil
@@ -182,6 +225,58 @@ func (d *Driver) UploadAndReportHash(ctx context.Context, parentID, name string,
 	}
 	result.FileID = fid
 	return result, nil
+}
+
+func shouldRetryPikPakUploadAttempt(err error, attempt int) bool {
+	return attempt < pikpakUploadMaxAttempts && isRetryablePikPakUploadError(err)
+}
+
+func pikpakUploadRetryDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	return time.Duration(attempt) * time.Second
+}
+
+func (d *Driver) logUploadRetry(name string, attempt int, err error) {
+	log.Printf("[pikpak] upload retry drive=%s name=%q next_attempt=%d/%d err=%v",
+		d.id, name, attempt+1, pikpakUploadMaxAttempts, err)
+}
+
+func isRetryablePikPakUploadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var serviceErr oss.ServiceError
+	if errors.As(err, &serviceErr) {
+		return serviceErr.StatusCode == http.StatusTooManyRequests || serviceErr.StatusCode >= 500
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no such host") ||
+		strings.Contains(text, "temporary failure in name resolution") ||
+		strings.Contains(text, "server misbehaving") ||
+		strings.Contains(text, "connection reset") ||
+		strings.Contains(text, "connection refused") ||
+		strings.Contains(text, "broken pipe") ||
+		strings.Contains(text, "eof") ||
+		strings.Contains(text, "i/o timeout") ||
+		strings.Contains(text, "tls handshake timeout") ||
+		strings.Contains(text, "http 429") ||
+		strings.Contains(text, "http 500") ||
+		strings.Contains(text, "http 502") ||
+		strings.Contains(text, "http 503") ||
+		strings.Contains(text, "http 504") ||
+		strings.Contains(text, "http 509") ||
+		strings.Contains(text, "too many requests") ||
+		strings.Contains(text, "temporarily unavailable") ||
+		strings.Contains(text, "service unavailable")
 }
 
 // bufferAndHashGCID 把 r 复制到一个临时文件，同时计算 GCID。
@@ -215,10 +310,13 @@ func bufferAndHashGCID(r io.Reader, size int64) (*os.File, string, int64, error)
 //
 // 参数复用 PikPak 的临时凭证；必须带 Security Token 头部 + UserAgent，与 OpenList 一致。
 func (d *Driver) uploadToOSS(ctx context.Context, p *s3Params, body io.Reader) error {
+	if d.uploadToOSSFunc != nil {
+		return d.uploadToOSSFunc(ctx, p, body)
+	}
 	if p == nil {
 		return errors.New("pikpak upload: nil s3 params")
 	}
-	client, err := oss.New(p.Endpoint, p.AccessKeyID, p.AccessKeySecret)
+	client, err := newPikPakOSSClient(p)
 	if err != nil {
 		return fmt.Errorf("oss client: %w", err)
 	}
@@ -233,6 +331,44 @@ func (d *Driver) uploadToOSS(ctx context.Context, p *s3Params, body io.Reader) e
 		oss.SetHeader(ossSecurityTokenHeaderName, p.SecurityToken),
 		oss.UserAgentHeader(ossUserAgent),
 	)
+}
+
+func newPikPakOSSClient(p *s3Params, options ...oss.ClientOption) (*oss.Client, error) {
+	if p == nil {
+		return nil, errors.New("pikpak upload: nil s3 params")
+	}
+	clientOptions := make([]oss.ClientOption, 0, len(options)+1)
+	if isPikPakCNAMEEndpoint(p.Endpoint) {
+		clientOptions = append(clientOptions, oss.UseCname(true))
+	}
+	clientOptions = append(clientOptions, options...)
+	return oss.New(p.Endpoint, p.AccessKeyID, p.AccessKeySecret, clientOptions...)
+}
+
+func isPikPakCNAMEEndpoint(endpoint string) bool {
+	host := endpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return host != "mypikpak.com" && host != "mypikpak.net" &&
+		(strings.HasSuffix(host, ".mypikpak.com") || strings.HasSuffix(host, ".mypikpak.net"))
+}
+
+func endpointHost(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
+		endpoint = u.Host
+	} else if idx := strings.IndexByte(endpoint, '/'); idx >= 0 {
+		endpoint = endpoint[:idx]
+	}
+	if host, _, err := net.SplitHostPort(endpoint); err == nil {
+		endpoint = host
+	}
+	return strings.Trim(endpoint, "[]")
 }
 
 type readerWithCtx struct {

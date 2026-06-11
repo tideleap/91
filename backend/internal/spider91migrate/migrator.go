@@ -16,6 +16,7 @@ package spider91migrate
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -701,8 +702,34 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 			continue
 		}
 
-		if plan.requireAssetsReady && !crawlerVideoAssetsReady(v) {
+		if targetDuplicate, err := m.cfg.Catalog.FindEquivalentVideoOnDrive(ctx, v, plan.targetDriveID); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[spider91migrate] %s find target duplicate: %v", v.ID, err)
+			}
+		} else if targetDuplicate != nil {
+			ok, err := m.bindToExistingTarget(ctx, v, targetDuplicate, plan)
+			if err != nil {
+				log.Printf("[spider91migrate] %s: %v", v.ID, err)
+				continue
+			}
+			if ok {
+				migrated++
+				if m.cfg.OnMigrated != nil {
+					m.cfg.OnMigrated(v.ID)
+				}
+			}
 			continue
+		}
+
+		if plan.requireAssetsReady {
+			ready, err := m.crawlerVideoAssetsReady(ctx, v)
+			if err != nil {
+				log.Printf("[spider91migrate] %s check generated assets: %v", v.ID, err)
+				continue
+			}
+			if !ready {
+				continue
+			}
 		}
 
 		ok, err := m.migrateOne(ctx, v, plan)
@@ -748,12 +775,18 @@ func (m *Migrator) findVideoForLocalFile(ctx context.Context, plan migrationPlan
 	return nil
 }
 
-func crawlerVideoAssetsReady(v *catalog.Video) bool {
+func (m *Migrator) crawlerVideoAssetsReady(ctx context.Context, v *catalog.Video) (bool, error) {
 	if v == nil {
-		return false
+		return false, nil
 	}
-	return strings.EqualFold(strings.TrimSpace(v.PreviewStatus), "ready") &&
-		strings.EqualFold(strings.TrimSpace(v.FingerprintStatus), "ready")
+	fingerprintReady := strings.EqualFold(strings.TrimSpace(v.FingerprintStatus), "ready") || strings.TrimSpace(v.SampledSHA256) != ""
+	if !fingerprintReady {
+		return false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(v.PreviewStatus), "ready") {
+		return true, nil
+	}
+	return m.cfg.Catalog.HasReadyEquivalentPreview(ctx, v)
 }
 
 // migrateOne 把单条本地爬虫视频上传到目标盘并改写 catalog。
@@ -813,6 +846,36 @@ func (m *Migrator) migrateOne(ctx context.Context, v *catalog.Video, plan migrat
 
 	log.Printf("[spider91migrate] %s migrated to drive=%s(kind=%s) file=%s name=%q", v.ID, plan.targetDriveID, pp.Kind(), res.FileID, uploadName)
 	return true, nil
+}
+
+func (m *Migrator) bindToExistingTarget(ctx context.Context, v, target *catalog.Video, plan migrationPlan) (bool, error) {
+	if v == nil || target == nil || plan.source == nil {
+		return false, nil
+	}
+	if plan.targetDriveID == "" || target.FileID == "" {
+		return false, nil
+	}
+	if err := m.cfg.Catalog.MigrateVideoToDrive(ctx, v.ID, plan.targetDriveID, target.FileID, firstNonEmpty(target.ContentHash, v.ContentHash)); err != nil {
+		return false, fmt.Errorf("catalog bind existing target: %w", err)
+	}
+	if target.FileName != "" {
+		if err := m.cfg.Catalog.UpdateVideoMeta(ctx, v.ID, catalog.VideoMetaPatch{FileName: target.FileName}); err != nil {
+			log.Printf("[spider91migrate] %s update file_name after duplicate bind: %v", v.ID, err)
+		}
+	}
+	m.preserveCrawledThumbnail(ctx, plan.source, v)
+	CleanupSpider91Local(plan.source, v.FileID)
+	log.Printf("[spider91migrate] %s bound to existing drive=%s(kind=%s) file=%s duplicate=%s", v.ID, plan.targetDriveID, plan.target.Kind(), target.FileID, target.ID)
+	return true, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func sourceIDForUploadName(v *catalog.Video, plan migrationPlan) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path"
@@ -43,8 +44,9 @@ type Driver struct {
 	algorithms    []string
 	userAgent     string
 
-	client        *resty.Client
-	onTokenUpdate func(access, refresh, captcha, deviceID string)
+	client          *resty.Client
+	onTokenUpdate   func(access, refresh, captcha, deviceID string)
+	uploadToOSSFunc func(context.Context, *s3Params, io.Reader) error
 
 	// captchaMu serializes captcha-token refreshes triggered by 4002 / 9
 	// recovery in requestOnce. Without it, N concurrent callers all hitting

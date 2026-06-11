@@ -586,6 +586,82 @@ func TestRunOnceSkipsScriptCrawlerVideoUntilPreviewAndFingerprintReady(t *testin
 	}
 }
 
+func TestRunOnceBindsScriptCrawlerDuplicateToExistingTargetWithoutUpload(t *testing.T) {
+	cat := setupCatalog(t)
+	src := setupScriptCrawler(t, "crawler-duplicate")
+	pp := newFakePikPak("pikpak-target", "pikpak-root-id")
+	seedScriptCrawlerDrive(t, cat, src, pp.ID())
+
+	reg := newFakeRegistry()
+	reg.Add(src)
+	reg.Add(pp)
+
+	content := []byte("duplicate script video bytes")
+	id := writeScriptCrawlerVideo(t, cat, src, "duplicate-source", ".mp4", content, false)
+	sampled := "same-sampled-fingerprint"
+	if err := cat.UpdateVideoFingerprint(context.Background(), id, sampled, "ready", ""); err != nil {
+		t.Fatalf("mark source fingerprint ready: %v", err)
+	}
+
+	now := time.Now()
+	target := &catalog.Video{
+		ID:            "pikpak-existing-duplicate",
+		DriveID:       pp.ID(),
+		FileID:        "existing-target-file",
+		FileName:      "existing-target-name.mp4",
+		ContentHash:   "existing-content-hash",
+		Title:         "Existing duplicate",
+		Ext:           "mp4",
+		Size:          int64(len(content)),
+		PreviewStatus: "ready",
+		PublishedAt:   now.Add(-time.Hour),
+		CreatedAt:     now.Add(-time.Hour),
+		UpdatedAt:     now.Add(-time.Hour),
+	}
+	if err := cat.UpsertVideo(context.Background(), target); err != nil {
+		t.Fatalf("upsert existing target: %v", err)
+	}
+	if err := cat.UpdateVideoFingerprint(context.Background(), target.ID, sampled, "ready", ""); err != nil {
+		t.Fatalf("mark target fingerprint ready: %v", err)
+	}
+
+	commonThumbDir := t.TempDir()
+	m := New(Config{Catalog: cat, Registry: reg, CommonThumbDir: commonThumbDir})
+	m.runOnce(context.Background())
+
+	if pp.uploadCalls != 0 {
+		t.Fatalf("upload calls = %d, want 0 when equivalent target file already exists", pp.uploadCalls)
+	}
+	got, err := cat.GetVideo(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get bound video: %v", err)
+	}
+	if got.DriveID != pp.ID() {
+		t.Fatalf("drive_id = %q, want %q", got.DriveID, pp.ID())
+	}
+	if got.FileID != target.FileID {
+		t.Fatalf("file_id = %q, want existing target file %q", got.FileID, target.FileID)
+	}
+	if got.FileName != target.FileName {
+		t.Fatalf("file_name = %q, want existing target name %q", got.FileName, target.FileName)
+	}
+	if got.ContentHash != target.ContentHash {
+		t.Fatalf("content_hash = %q, want %q", got.ContentHash, target.ContentHash)
+	}
+	videoPath, _ := src.VideoPath("duplicate-source.mp4")
+	if _, err := os.Stat(videoPath); !os.IsNotExist(err) {
+		t.Fatalf("local duplicate video still exists or stat error %v", err)
+	}
+	thumbPath, _ := src.ThumbPath("duplicate-source.jpg")
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Fatalf("local duplicate thumb still exists or stat error %v", err)
+	}
+	commonThumbPath := filepath.Join(commonThumbDir, id+".jpg")
+	if data, err := os.ReadFile(commonThumbPath); err != nil || string(data) != "thumb" {
+		t.Fatalf("common thumb = %q, %v; want copied crawled thumb", string(data), err)
+	}
+}
+
 func TestRunOnceSkipsWhenLocalFileMissing(t *testing.T) {
 	cat := setupCatalog(t)
 	src, _ := setupSpider91(t)
