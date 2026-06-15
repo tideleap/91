@@ -2,8 +2,14 @@
    滚动靠原生 scroll-snap 实现 TikTok 式吸附切屏。 */
 
 .shorts-page {
-  position: fixed;
-  inset: 0;
+  /* 不能用 fixed 定位：iOS Safari/WebKit 不会合成（渲染）嵌套在 fixed
+     祖先里的内联 <video>，视频能解码播放但画面始终不显示（黑屏）。
+     桌面 Chrome 正常，所以只在 iOS 上表现为黑屏。
+     这里改用普通流里的满屏块（高度锁视口），沉浸态的滚动锁定已由组件在
+     mount 时给 html/body 设置 overflow:hidden 实现，效果等价。 */
+  position: relative;
+  width: 100%;
+  height: 100svh;
   background: #000;
   color: #fff;
   z-index: 50;
@@ -16,6 +22,17 @@
   user-select: none;
   /* 防止移动端在边缘滑动触发"上一页"导航 */
   overscroll-behavior: none;
+}
+
+@supports not (height: 100svh) {
+  .shorts-page {
+    height: 100dvh;
+  }
+}
+@supports not (height: 100dvh) {
+  .shorts-page {
+    height: 100vh;
+  }
 }
 
 /* ---------- 顶部条 (高阶毛玻璃渐变遮罩) ---------- */
