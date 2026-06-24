@@ -93,7 +93,7 @@ nginx配置中需要添加下面字段
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 ```
-如果不配置，可能导致自己被封禁
+如果不配置真实 IP 请求头，后端可能把所有请求都识别为 Nginx 或本机 IP，登录失败触发封禁时，可能会封到本机地址，导致所有用户都无法登录
 
 
 ### 方式二：Docker Compose 部署
